@@ -18,7 +18,8 @@ namespace Layers
 	static constexpr ObjectLayer MOVING = 5;
 	static constexpr ObjectLayer DEBRIS = 6; // Example: Debris collides only with NON_MOVING
 	static constexpr ObjectLayer SENSOR = 7; // Sensors only collide with MOVING objects
-	static constexpr ObjectLayer NUM_LAYERS = 8;
+	static constexpr ObjectLayer STRUCTURE = 8; // Structural bodies: live in NON_MOVING broadphase so the tree isn't rebuilt every frame, but collide with MOVING
+	static constexpr ObjectLayer NUM_LAYERS = 9;
 };
 
 /// Class that determines if two object layers can collide
@@ -37,9 +38,11 @@ public:
 		case Layers::NON_MOVING:
 			return inObject2 == Layers::MOVING || inObject2 == Layers::DEBRIS;
 		case Layers::MOVING:
-			return inObject2 == Layers::NON_MOVING || inObject2 == Layers::MOVING || inObject2 == Layers::SENSOR;
+			return inObject2 == Layers::NON_MOVING || inObject2 == Layers::MOVING || inObject2 == Layers::SENSOR || inObject2 == Layers::STRUCTURE;
 		case Layers::DEBRIS:
 			return inObject2 == Layers::NON_MOVING;
+		case Layers::STRUCTURE:
+			return inObject2 == Layers::MOVING;
 		case Layers::SENSOR:
 			return inObject2 == Layers::MOVING;
 		default:
@@ -75,6 +78,7 @@ public:
 		mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
 		mObjectToBroadPhase[Layers::DEBRIS] = BroadPhaseLayers::DEBRIS;
 		mObjectToBroadPhase[Layers::SENSOR] = BroadPhaseLayers::SENSOR;
+		mObjectToBroadPhase[Layers::STRUCTURE] = BroadPhaseLayers::NON_MOVING;
 	}
 
 	virtual uint					GetNumBroadPhaseLayers() const override
@@ -122,6 +126,8 @@ public:
 		case Layers::DEBRIS:
 			return inLayer2 == BroadPhaseLayers::NON_MOVING;
 		case Layers::SENSOR:
+			return inLayer2 == BroadPhaseLayers::MOVING;
+		case Layers::STRUCTURE:
 			return inLayer2 == BroadPhaseLayers::MOVING;
 		case Layers::UNUSED1:
 		case Layers::UNUSED2:

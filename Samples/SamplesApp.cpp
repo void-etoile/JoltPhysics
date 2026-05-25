@@ -115,6 +115,7 @@ JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, AllowedDOFsTest)
 JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, ShapeFilterTest)
 JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, SimShapeFilterTest)
 JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, GyroscopicForceTest)
+JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, DestructibleTest)
 #ifdef JPH_OBJECT_STREAM
 JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, LoadSaveSceneTest)
 #endif // JPH_OBJECT_STREAM
@@ -162,6 +163,7 @@ static TestNameAndRTTI sGeneralTests[] =
 	{ "Shape Filter (Collision Detection)",	JPH_RTTI(ShapeFilterTest) },
 	{ "Shape Filter (Simulation)",			JPH_RTTI(SimShapeFilterTest) },
 	{ "Gyroscopic Force",					JPH_RTTI(GyroscopicForceTest) },
+	{ "Destructible",						JPH_RTTI(DestructibleTest) },
 };
 
 JPH_DECLARE_RTTI_FOR_FACTORY(JPH_NO_EXPORT, DistanceConstraintTest)
@@ -2144,6 +2146,11 @@ bool SamplesApp::UpdateFrame(float inDeltaTime)
 	else
 		mStatusString = mTest->GetStatusString();
 
+	// Append physics step wall time (EMA, lags one frame — imperceptible)
+	if (!mStatusString.empty())
+		mStatusString += "\n";
+	mStatusString += StringFormat("Physics CPU: %.2f ms", (double)mPhysicsStepMs);
+
 	// Select the next test if automatic testing times out
 	if (!CheckNextTest())
 		return false;
@@ -2603,6 +2610,10 @@ void SamplesApp::StepPhysics(JobSystem *inJobSystem)
 	chrono::microseconds duration = chrono::duration_cast<chrono::microseconds>(clock_end - clock_start);
 	mTotalTime += duration;
 	mStepNumber++;
+
+	// Exponential moving average of step time (alpha ≈ 0.05 → ~20-step smoothing window)
+	float step_ms = duration.count() * 0.001f;
+	mPhysicsStepMs = mPhysicsStepMs == 0.0f ? step_ms : mPhysicsStepMs * 0.95f + step_ms * 0.05f;
 
 	// Print timing information
 	constexpr uint cNumSteps = 60;
