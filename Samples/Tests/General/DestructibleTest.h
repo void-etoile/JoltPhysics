@@ -7,14 +7,19 @@
 #include <Tests/Test.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Core/UnorderedMap.h>
+#include <mutex>
 
 /// Demonstrates frame-and-infill destructible environments.
-/// A rigid structural frame (columns and beams) is held by high-break-force FixedConstraints.
-/// Lightweight infill panels fill each bay with low-break-force constraints so they shatter
-/// independently while the frame can survive. Adjust the sliders to explore the difference.
-class DestructibleTest : public Test
+/// Structural chunks (columns, beams, roof slabs) take damage from contact impulses
+/// detected via ContactListener. When accumulated damage exceeds the break threshold
+/// the chunk fractures into Voronoi debris. A BFS support-graph pass propagates
+/// structural collapse to unsupported elements. Infill panels are lighter and
+/// break from much smaller impacts; they also break when pulled >5 cm from their
+/// attachment points (gap check). Adjust the sliders to tune both thresholds.
+class DestructibleTest : public Test, public ContactListener
 {
 public:
 	JPH_DECLARE_RTTI_VIRTUAL(JPH_NO_EXPORT, DestructibleTest)
@@ -22,10 +27,10 @@ public:
 	// Description of the test
 	virtual const char *	GetDescription() const override
 	{
-		return "A building wall and a house (4 walls + gable roof) using frame-and-infill destruction. "
-			   "Panels break at a low threshold; frame constraints require much greater force. "
-			   "Press Enter to fire projectiles from the camera. Space to drag bodies. "
-			   "Lower the Frame Break Force to collapse the whole structure.";
+		return "A city block with a main demo wall, houses, and multi-story apartment buildings. "
+			   "Panels break from low-energy impacts; frame elements require much more. "
+			   "Press Enter to fire projectiles. Space to drag bodies. "
+			   "Lower Frame Break Force to collapse whole structures.";
 	}
 
 	// See: Test
@@ -46,49 +51,67 @@ public:
 	virtual void			SaveInputState(StateRecorder &inStream) const override;
 	virtual void			RestoreInputState(StateRecorder &inStream) override;
 
+	// ContactListener — accumulate per-body impact impulses on the physics thread
+	virtual ValidateResult	OnContactValidate(const Body &, const Body &, RVec3Arg, const CollideShapeResult &) override { return ValidateResult::AcceptAllContactsForThisBodyPair; }
+	virtual void			OnContactAdded(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override;
+	virtual void			OnContactPersisted(const Body &, const Body &, const ContactManifold &, ContactSettings &) override {}
+	virtual void			OnContactRemoved(const SubShapeIDPair &) override {}
+
 private:
 	struct FractureInfo
 	{
 		Array<RefConst<Shape>>	mShapes;		// one convex hull per Voronoi cell
 		Array<Vec3>				mLocalCenters;	// centroid of each cell in panel local space
-		bool					mIsFrame = false; // true = fracture when frame constraints gone; false = panel constraints
+		bool					mIsFrame = false; // true → break when frame constraints gone; false → panel constraints
 	};
 
 	void					FireProjectile(RVec3Arg inPos, Vec3Arg inDirection);
+	void					BuildMainWall();
 	void					BuildHouse(RVec3Arg inCenter);
+	void					BuildApartment(RVec3Arg inCenter, int inNumFloors, float inHalfW, float inHalfD);
+	void					BuildTower(RVec3Arg inCenter, int inNumFloors, float inRadius, int inNumSides);
+	void					BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inFloorsPerSeg, float inHalfW, float inHalfD);
 	void					CheckStructuralIntegrity();
 	void					SpawnFracture(BodyID inPanelID);
 
 	struct ProjectileRecord { BodyID mID; float mLifeRemaining; };
 
-	Array<Ref<FixedConstraint>>			mPanelConstraints;	// infill panels — low break force
-	Array<Ref<FixedConstraint>>			mFrameConstraints;	// columns and beams — high break force
-	UnorderedMap<BodyID, FractureInfo>	mFractureData;		// registered panels → fracture geometry
-	Array<BodyID>						mShardBodies;		// all live shard bodies, for sleeping cleanup
+	Array<Ref<FixedConstraint>>			mPanelConstraints;	// infill panels
+	Array<Ref<FixedConstraint>>			mFrameConstraints;	// structural frame
+	UnorderedMap<BodyID, FractureInfo>	mFractureData;		// registered chunks → fracture geometry
+	Array<BodyID>						mShardBodies;		// live shard bodies, cleaned up when sleeping
 	Array<ProjectileRecord>				mProjectiles;		// live projectiles with remaining lifetime
 
-	// Adjacency index: maintained incrementally so constraint lookup/removal is O(degree).
-	UnorderedMap<BodyID, int>							mFrameConnCount;	// #frame constraints touching each body
-	UnorderedMap<BodyID, int>							mPanelConnCount;	// #panel constraints touching each body
-	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>>	mFrameAdj;			// frame constraints per body
-	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>>	mPanelAdj;			// panel constraints per body
-	UnorderedMap<FixedConstraint *, int>				mFrameIdx;			// constraint → index in mFrameConstraints
-	UnorderedMap<FixedConstraint *, int>				mPanelIdx;			// constraint → index in mPanelConstraints
+	// Adjacency index: O(degree) constraint lookup and removal.
+	UnorderedMap<BodyID, int>							mFrameConnCount;
+	UnorderedMap<BodyID, int>							mPanelConnCount;
+	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>>	mFrameAdj;
+	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>>	mPanelAdj;
+	UnorderedMap<FixedConstraint *, int>				mFrameIdx;
+	UnorderedMap<FixedConstraint *, int>				mPanelIdx;
 
-	// Create a FixedConstraint between inA and inB, add it to the physics system, and
-	// register it in all adjacency data structures.
+	// Per-chunk accumulated damage (N·s). Filled from mPendingDamage each frame.
+	UnorderedMap<BodyID, float>							mChunkDamage;
+
+	// Thread-safe staging buffer: OnContactAdded (physics thread) pushes here;
+	// PrePhysicsUpdate (main thread) drains it under mDamageMutex.
+	std::mutex										mDamageMutex;
+	Array<std::pair<BodyID, float>>					mPendingDamage;
+
+	// Create a FixedConstraint between inA and inB, register it everywhere.
 	void					TrackConstraint(bool inIsFrame, Body *inA, Body *inB);
 
-	// Remove the constraint at position inPos from the appropriate array (swap-and-pop),
-	// update all adjacency data structures, and call RemoveConstraint.
+	// Swap-and-pop removal of the constraint at inPos; updates all indices.
 	void					UntrackConstraint(bool inIsFrame, int inPos);
 
 	int						mInitialPanelCount = 0;
 	int						mInitialFrameCount = 0;
-	float					mLastBreakCheckUs = 0.0f;	// microseconds for constraint break loop
+	float					mLastBreakCheckUs = 0.0f;
+	int						mBreakLogCount = 0;
+	FILE *					mLogFile = nullptr;
 
-	bool					mFire = false;			// set in ProcessInput, consumed in PrePhysicsUpdate
-	bool					mWasFire = false;		// edge-detection state for IsKeyPressedAndTriggered
+	bool					mFire = false;
+	bool					mWasFire = false;
 
 	static float			sPanelBreakForce;
 	static float			sFrameBreakForce;

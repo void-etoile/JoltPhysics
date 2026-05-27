@@ -112,6 +112,7 @@ set(SAMPLES_SRC_FILES
 	${SAMPLES_ROOT}/Tests/General/DampingTest.h
 	${SAMPLES_ROOT}/Tests/General/DestructibleTest.cpp
 	${SAMPLES_ROOT}/Tests/General/DestructibleTest.h
+	${SAMPLES_ROOT}/Tests/General/DestructibleTestBuildings.cpp
 	${SAMPLES_ROOT}/Tests/General/DynamicMeshTest.cpp
 	${SAMPLES_ROOT}/Tests/General/DynamicMeshTest.h
 	${SAMPLES_ROOT}/Tests/General/FrictionTest.cpp
