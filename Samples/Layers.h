@@ -40,9 +40,9 @@ public:
 		case Layers::MOVING:
 			return inObject2 == Layers::NON_MOVING || inObject2 == Layers::MOVING || inObject2 == Layers::SENSOR || inObject2 == Layers::STRUCTURE;
 		case Layers::DEBRIS:
-			return inObject2 == Layers::NON_MOVING;
+			return inObject2 == Layers::NON_MOVING || inObject2 == Layers::STRUCTURE;
 		case Layers::STRUCTURE:
-			return inObject2 == Layers::MOVING;
+			return inObject2 == Layers::MOVING || inObject2 == Layers::DEBRIS;
 		case Layers::SENSOR:
 			return inObject2 == Layers::MOVING;
 		default:

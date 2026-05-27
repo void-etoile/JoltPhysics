@@ -155,6 +155,7 @@ void DestructibleTest::BuildMainWall()
 	RefConst<Shape> panel_shape	= new BoxShape(cPanelHalf);
 
 	Ref<GroupFilterTable> building_filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
 
 	float col_x[cNumBays + 1];
 	for (int j = 0; j <= cNumBays; ++j)
@@ -163,7 +164,7 @@ void DestructibleTest::BuildMainWall()
 	auto addBody = [&](const BodyCreationSettings &inBCS, EActivation) -> Body *
 	{
 		Body *b = mBodyInterface->CreateBody(inBCS);
-		b->SetCollisionGroup(CollisionGroup(building_filter, 0, 0));
+		b->SetCollisionGroup(CollisionGroup(building_filter, gid, 0));
 		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
 		return b;
 	};
@@ -184,7 +185,7 @@ void DestructibleTest::BuildMainWall()
 			BodyCreationSettings bcs(is_base ? stub_shape : col_shape,
 				RVec3(col_x[j], y, 0.0f), Quat::sIdentity(),
 				is_base ? EMotionType::Static  : EMotionType::Dynamic,
-				is_base ? Layers::NON_MOVING   : Layers::STRUCTURE);
+				is_base ? Layers::NON_MOVING   : Layers::MOVING);
 
 			if (!is_base)
 			{
@@ -215,7 +216,7 @@ void DestructibleTest::BuildMainWall()
 			float y = cStubHeight + i * cFloorHeight;
 
 			BodyCreationSettings bcs(beam_shape, RVec3(x, y, 0.0f), Quat::sIdentity(),
-				EMotionType::Dynamic, Layers::STRUCTURE);
+				EMotionType::Dynamic, Layers::MOVING);
 			bcs.mOverrideMassProperties			= EOverrideMassProperties::CalculateInertia;
 			bcs.mMassPropertiesOverride.mMass	= 100.0f;
 
@@ -242,7 +243,7 @@ void DestructibleTest::BuildMainWall()
 			float y = cStubHeight + (i - 0.5f) * cFloorHeight;
 
 			BodyCreationSettings bcs(panel_shape, RVec3(x, y, 0.0f), Quat::sIdentity(),
-				EMotionType::Dynamic, Layers::STRUCTURE);
+				EMotionType::Dynamic, Layers::MOVING);
 			bcs.mOverrideMassProperties			= EOverrideMassProperties::CalculateInertia;
 			bcs.mMassPropertiesOverride.mMass	= 20.0f;
 
@@ -313,6 +314,7 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 	RefConst<Shape> s_pws   = new BoxShape(Vec3(0.05f,             panel_half_h, hD * 0.5f - 0.15f));
 
 	Ref<GroupFilterTable> house_filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
 
 	auto addBody = [&](RVec3Arg inLocalPos, QuatArg inRot, RefConst<Shape> inShape,
 		EMotionType inMotion, ObjectLayer inLayer, float inMass, EActivation) -> Body *
@@ -324,7 +326,7 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 			bcs.mMassPropertiesOverride.mMass	= inMass;
 		}
 		Body *b = mBodyInterface->CreateBody(bcs);
-		b->SetCollisionGroup(CollisionGroup(house_filter, 0, 0));
+		b->SetCollisionGroup(CollisionGroup(house_filter, gid, 0));
 		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
 		return b;
 	};
@@ -357,7 +359,7 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 		Body *stub   = addBody(RVec3(x, stub_cy, z), Quat::sIdentity(), s_stub,
 			EMotionType::Static,  Layers::NON_MOVING, 0,     EActivation::DontActivate);
 		Body *pillar = addBody(RVec3(x, col_cy,  z), Quat::sIdentity(), s_col,
-			EMotionType::Dynamic, Layers::STRUCTURE,  300.0f, EActivation::Activate);
+			EMotionType::Dynamic, Layers::MOVING,  300.0f, EActivation::Activate);
 		frameC(stub, pillar);
 		registerHouseElement(pillar, x, col_cy, z, Vec3(0.1f, pillar_half_h, 0.1f), 3, true);
 		return pillar;
@@ -379,14 +381,14 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 	const float bcx = hW * 0.5f;
 	const float bcz = hD * 0.5f;
 
-	Body *bf1 = addBody(RVec3(-bcx, bcy, -hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *bf2 = addBody(RVec3(+bcx, bcy, -hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *bb1 = addBody(RVec3(-bcx, bcy, +hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *bb2 = addBody(RVec3(+bcx, bcy, +hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *bl1 = addBody(RVec3(-hW, bcy, -bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *bl2 = addBody(RVec3(-hW, bcy, +bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *br1 = addBody(RVec3(+hW, bcy, -bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
-	Body *br2 = addBody(RVec3(+hW, bcy, +bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 50, EActivation::Activate);
+	Body *bf1 = addBody(RVec3(-bcx, bcy, -hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *bf2 = addBody(RVec3(+bcx, bcy, -hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *bb1 = addBody(RVec3(-bcx, bcy, +hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *bb2 = addBody(RVec3(+bcx, bcy, +hD), Quat::sIdentity(), s_bx, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *bl1 = addBody(RVec3(-hW, bcy, -bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *bl2 = addBody(RVec3(-hW, bcy, +bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *br1 = addBody(RVec3(+hW, bcy, -bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
+	Body *br2 = addBody(RVec3(+hW, bcy, +bcz), Quat::sIdentity(), s_bz, EMotionType::Dynamic, Layers::MOVING, 50, EActivation::Activate);
 
 	const Vec3 bx_he(hW * 0.5f - 0.1f, 0.1f, 0.1f);
 	const Vec3 bz_he(0.1f, 0.1f, hD * 0.5f - 0.1f);
@@ -402,7 +404,7 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 	// -----------------------------------------------------------------------
 	// Ridge beam
 	// -----------------------------------------------------------------------
-	Body *ridge = addBody(RVec3(0, hH + hRise, 0), Quat::sIdentity(), s_ridge, EMotionType::Dynamic, Layers::STRUCTURE, 80, EActivation::Activate);
+	Body *ridge = addBody(RVec3(0, hH + hRise, 0), Quat::sIdentity(), s_ridge, EMotionType::Dynamic, Layers::MOVING, 80, EActivation::Activate);
 	registerHouseElement(ridge, 0, hH + hRise, 0, Vec3(hW - 0.1f, 0.1f, 0.1f), 3, true);
 
 	// -----------------------------------------------------------------------
@@ -410,13 +412,13 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 	// -----------------------------------------------------------------------
 	Body *roof_f = addBody(RVec3(0, hH + hRise * 0.5f, -hD * 0.5f),
 		Quat::sRotation(Vec3::sAxisX(), -roof_angle), s_roof,
-		EMotionType::Dynamic, Layers::STRUCTURE, 60, EActivation::Activate);
+		EMotionType::Dynamic, Layers::MOVING, 60, EActivation::Activate);
 	registerHouseElement(roof_f, 0, hH + hRise * 0.5f, -hD * 0.5f,
 		Vec3(hW - 0.1f, 0.05f, slope_half), cFracturePieces, true);
 
 	Body *roof_b = addBody(RVec3(0, hH + hRise * 0.5f, +hD * 0.5f),
 		Quat::sRotation(Vec3::sAxisX(), +roof_angle), s_roof,
-		EMotionType::Dynamic, Layers::STRUCTURE, 60, EActivation::Activate);
+		EMotionType::Dynamic, Layers::MOVING, 60, EActivation::Activate);
 	registerHouseElement(roof_b, 0, hH + hRise * 0.5f, +hD * 0.5f,
 		Vec3(hW - 0.1f, 0.05f, slope_half), cFracturePieces, true);
 
@@ -426,14 +428,14 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 	const Vec3 pwf_he(hW * 0.5f - 0.2f, panel_half_h, 0.05f);
 	const Vec3 pws_he(0.05f, panel_half_h, hD * 0.5f - 0.15f);
 
-	Body *fp1 = addBody(RVec3(-bcx, col_cy, -hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *fp2 = addBody(RVec3(+bcx, col_cy, -hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *bp1 = addBody(RVec3(-bcx, col_cy, +hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *bp2 = addBody(RVec3(+bcx, col_cy, +hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *lp1 = addBody(RVec3(-hW, col_cy, -bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *lp2 = addBody(RVec3(-hW, col_cy, +bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *rp1 = addBody(RVec3(+hW, col_cy, -bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
-	Body *rp2 = addBody(RVec3(+hW, col_cy, +bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20, EActivation::Activate);
+	Body *fp1 = addBody(RVec3(-bcx, col_cy, -hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *fp2 = addBody(RVec3(+bcx, col_cy, -hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *bp1 = addBody(RVec3(-bcx, col_cy, +hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *bp2 = addBody(RVec3(+bcx, col_cy, +hD), Quat::sIdentity(), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *lp1 = addBody(RVec3(-hW, col_cy, -bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *lp2 = addBody(RVec3(-hW, col_cy, +bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *rp1 = addBody(RVec3(+hW, col_cy, -bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
+	Body *rp2 = addBody(RVec3(+hW, col_cy, +bcz), Quat::sIdentity(), s_pws, EMotionType::Dynamic, Layers::MOVING, 20, EActivation::Activate);
 
 	registerHousePanel(fp1, -bcx, col_cy, -hD, pwf_he);
 	registerHousePanel(fp2, +bcx, col_cy, -hD, pwf_he);
@@ -498,6 +500,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 	RefConst<Shape> s_roof = new BoxShape(Vec3(inHalfW - 0.1f, 0.1f, inHalfD - 0.1f));
 
 	Ref<GroupFilterTable> apt_filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
 
 	auto addBody = [&](RVec3Arg lPos, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{
@@ -508,7 +511,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 			bcs.mMassPropertiesOverride.mMass    = mass;
 		}
 		Body *b = mBodyInterface->CreateBody(bcs);
-		b->SetCollisionGroup(CollisionGroup(apt_filter, 0, 0));
+		b->SetCollisionGroup(CollisionGroup(apt_filter, gid, 0));
 		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
 		return b;
 	};
@@ -542,7 +545,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 			for (int f = 0; f < inNumFloors; ++f)
 			{
 				float y = aStubH + colHalf + f * aFloorH;
-				Body *seg = addBody(RVec3(x, y, z), s_col, EMotionType::Dynamic, Layers::STRUCTURE, 200.0f);
+				Body *seg = addBody(RVec3(x, y, z), s_col, EMotionType::Dynamic, Layers::MOVING, 200.0f);
 				regElem(seg, RVec3(x, y, z), Vec3(0.1f, colHalf, 0.1f), 3, true);
 				cols[xi][zi].push_back(seg);
 			}
@@ -566,10 +569,10 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 		Body *cBL = cols[0][1][f];
 		Body *cBR = cols[1][1][f];
 
-		Body *bf = addBody(RVec3(0,        beam_y, -inHalfD), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
-		Body *bb = addBody(RVec3(0,        beam_y, +inHalfD), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
-		Body *bl = addBody(RVec3(-inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
-		Body *br = addBody(RVec3(+inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
+		Body *bf = addBody(RVec3(0,        beam_y, -inHalfD), s_bx, EMotionType::Dynamic, Layers::MOVING, 60.0f);
+		Body *bb = addBody(RVec3(0,        beam_y, +inHalfD), s_bx, EMotionType::Dynamic, Layers::MOVING, 60.0f);
+		Body *bl = addBody(RVec3(-inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::MOVING, 60.0f);
+		Body *br = addBody(RVec3(+inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::MOVING, 60.0f);
 		regElem(bf, RVec3(0,        beam_y, -inHalfD), Vec3(inHalfW - 0.1f, 0.1f, 0.1f),    3, true);
 		regElem(bb, RVec3(0,        beam_y, +inHalfD), Vec3(inHalfW - 0.1f, 0.1f, 0.1f),    3, true);
 		regElem(bl, RVec3(-inHalfW, beam_y, 0),        Vec3(0.1f, 0.1f, inHalfD - 0.1f),    3, true);
@@ -580,10 +583,10 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 		frameC(cFL, bl); frameC(cBL, bl);
 		frameC(cFR, br); frameC(cBR, br);
 
-		Body *pf = addBody(RVec3(0,        panel_y, -inHalfD), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
-		Body *pb = addBody(RVec3(0,        panel_y, +inHalfD), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
-		Body *pl = addBody(RVec3(-inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
-		Body *pr = addBody(RVec3(+inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
+		Body *pf = addBody(RVec3(0,        panel_y, -inHalfD), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20.0f);
+		Body *pb = addBody(RVec3(0,        panel_y, +inHalfD), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20.0f);
+		Body *pl = addBody(RVec3(-inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::MOVING, 20.0f);
+		Body *pr = addBody(RVec3(+inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::MOVING, 20.0f);
 		regElem(pf, RVec3(0,        panel_y, -inHalfD), Vec3(inHalfW - 0.2f, panHalfH, 0.05f),   cFracturePieces, false);
 		regElem(pb, RVec3(0,        panel_y, +inHalfD), Vec3(inHalfW - 0.2f, panHalfH, 0.05f),   cFracturePieces, false);
 		regElem(pl, RVec3(-inHalfW, panel_y, 0),        Vec3(0.05f, panHalfH, inHalfD - 0.2f),   cFracturePieces, false);
@@ -596,7 +599,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 	}
 
 	float roof_y = aStubH + inNumFloors * aFloorH;
-	Body *roof = addBody(RVec3(0, roof_y, 0), s_roof, EMotionType::Dynamic, Layers::STRUCTURE, 200.0f);
+	Body *roof = addBody(RVec3(0, roof_y, 0), s_roof, EMotionType::Dynamic, Layers::MOVING, 200.0f);
 	regElem(roof, RVec3(0, roof_y, 0), Vec3(inHalfW - 0.1f, 0.1f, inHalfD - 0.1f), cFracturePieces, true);
 	frameC(cols[0][0][inNumFloors - 1], roof);
 	frameC(cols[1][0][inNumFloors - 1], roof);
@@ -628,6 +631,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 	RefConst<Shape> s_roof = new BoxShape(Vec3(inHalfW - 0.1f,  0.1f,    inHalfD - 0.1f));
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
 
 	auto addBody = [&](RVec3Arg lPos, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{
@@ -638,7 +642,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 			bcs.mMassPropertiesOverride.mMass    = mass;
 		}
 		Body *b = mBodyInterface->CreateBody(bcs);
-		b->SetCollisionGroup(CollisionGroup(filter, 0, 0));
+		b->SetCollisionGroup(CollisionGroup(filter, gid, 0));
 		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
 		return b;
 	};
@@ -672,7 +676,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 			for (int s = 0; s < numSegs; ++s)
 			{
 				float y = hStubH + segHalf + s * segH;
-				Body *seg = addBody(RVec3(x, y, z), s_col, EMotionType::Dynamic, Layers::STRUCTURE,
+				Body *seg = addBody(RVec3(x, y, z), s_col, EMotionType::Dynamic, Layers::MOVING,
 					200.0f * float(inFloorsPerSeg));
 				regElem(seg, RVec3(x, y, z), Vec3(0.15f, segHalf, 0.15f), inFloorsPerSeg + 2, true);
 				cols[xi][zi].push_back(seg);
@@ -698,10 +702,10 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 		Body *cBL = cols[0][1][s];
 		Body *cBR = cols[1][1][s];
 
-		Body *bf = addBody(RVec3(0,        beam_y, -inHalfD), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
-		Body *bb = addBody(RVec3(0,        beam_y, +inHalfD), s_bx, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
-		Body *bl = addBody(RVec3(-inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
-		Body *br = addBody(RVec3(+inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::STRUCTURE, 60.0f);
+		Body *bf = addBody(RVec3(0,        beam_y, -inHalfD), s_bx, EMotionType::Dynamic, Layers::MOVING, 60.0f);
+		Body *bb = addBody(RVec3(0,        beam_y, +inHalfD), s_bx, EMotionType::Dynamic, Layers::MOVING, 60.0f);
+		Body *bl = addBody(RVec3(-inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::MOVING, 60.0f);
+		Body *br = addBody(RVec3(+inHalfW, beam_y, 0),        s_bz, EMotionType::Dynamic, Layers::MOVING, 60.0f);
 		regElem(bf, RVec3(0,        beam_y, -inHalfD), Vec3(inHalfW - 0.1f, 0.1f, 0.1f),    3, true);
 		regElem(bb, RVec3(0,        beam_y, +inHalfD), Vec3(inHalfW - 0.1f, 0.1f, 0.1f),    3, true);
 		regElem(bl, RVec3(-inHalfW, beam_y, 0),        Vec3(0.1f, 0.1f, inHalfD - 0.1f),    3, true);
@@ -712,10 +716,10 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 		frameC(cFL, bl); frameC(cBL, bl);
 		frameC(cFR, br); frameC(cBR, br);
 
-		Body *pf = addBody(RVec3(0,        panel_y, -inHalfD), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
-		Body *pb = addBody(RVec3(0,        panel_y, +inHalfD), s_pwf, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
-		Body *pl = addBody(RVec3(-inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
-		Body *pr = addBody(RVec3(+inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
+		Body *pf = addBody(RVec3(0,        panel_y, -inHalfD), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20.0f);
+		Body *pb = addBody(RVec3(0,        panel_y, +inHalfD), s_pwf, EMotionType::Dynamic, Layers::MOVING, 20.0f);
+		Body *pl = addBody(RVec3(-inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::MOVING, 20.0f);
+		Body *pr = addBody(RVec3(+inHalfW, panel_y, 0),        s_pws, EMotionType::Dynamic, Layers::MOVING, 20.0f);
 		regElem(pf, RVec3(0,        panel_y, -inHalfD), Vec3(inHalfW - 0.2f, panHalfH, 0.05f),   cFracturePieces, false);
 		regElem(pb, RVec3(0,        panel_y, +inHalfD), Vec3(inHalfW - 0.2f, panHalfH, 0.05f),   cFracturePieces, false);
 		regElem(pl, RVec3(-inHalfW, panel_y, 0),        Vec3(0.05f, panHalfH, inHalfD - 0.2f),   cFracturePieces, false);
@@ -728,7 +732,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 	}
 
 	float  roof_y = hStubH + float(numSegs) * segH;
-	Body  *roof   = addBody(RVec3(0, roof_y, 0), s_roof, EMotionType::Dynamic, Layers::STRUCTURE, 400.0f);
+	Body  *roof   = addBody(RVec3(0, roof_y, 0), s_roof, EMotionType::Dynamic, Layers::MOVING, 400.0f);
 	regElem(roof, RVec3(0, roof_y, 0), Vec3(inHalfW - 0.1f, 0.1f, inHalfD - 0.1f), cFracturePieces, true);
 	for (int xi = 0; xi < 2; ++xi)
 		for (int zi = 0; zi < 2; ++zi)
@@ -772,6 +776,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 		: (RefConst<Shape>)new BoxShape(Vec3(inRadius * 0.85f, 0.1f, inRadius * 0.85f));
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
 
 	auto addBody = [&](RVec3Arg lPos, QuatArg rot, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{
@@ -782,7 +787,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 			bcs.mMassPropertiesOverride.mMass    = mass;
 		}
 		Body *b = mBodyInterface->CreateBody(bcs);
-		b->SetCollisionGroup(CollisionGroup(filter, 0, 0));
+		b->SetCollisionGroup(CollisionGroup(filter, gid, 0));
 		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
 		return b;
 	};
@@ -819,7 +824,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 		{
 			float y   = tStubH + colHalf + f * tFloorH;
 			Body *seg = addBody(RVec3(cx, y, cz), Quat::sIdentity(), s_col,
-				EMotionType::Dynamic, Layers::STRUCTURE, 200.0f);
+				EMotionType::Dynamic, Layers::MOVING, 200.0f);
 			regElem(seg, RVec3(cx, y, cz), Vec3(0.1f, colHalf, 0.1f), 3, true);
 			cols[k][f] = seg;
 		}
@@ -851,13 +856,13 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 			Quat rot = Quat::sRotation(Vec3::sAxisY(), atan2f(ck_z - cn_z, cn_x - ck_x));
 
 			Body *beam = addBody(RVec3(bx, beam_y, bz), rot, s_beam,
-				EMotionType::Dynamic, Layers::STRUCTURE, 50.0f);
+				EMotionType::Dynamic, Layers::MOVING, 50.0f);
 			regElem(beam, RVec3(bx, beam_y, bz), Vec3(chordHalf - 0.12f, 0.1f, 0.1f), 3, true);
 			frameC(cols[k][f], beam);
 			frameC(cols[kn][f], beam);
 
 			Body *panel = addBody(RVec3(bx, panel_y, bz), rot, s_panel,
-				EMotionType::Dynamic, Layers::STRUCTURE, 20.0f);
+				EMotionType::Dynamic, Layers::MOVING, 20.0f);
 			regElem(panel, RVec3(bx, panel_y, bz), Vec3(chordHalf - 0.20f, panHalfH, 0.05f), cFracturePieces, false);
 			panelC(cols[k][f], panel);
 			panelC(cols[kn][f], panel);
@@ -866,7 +871,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 
 	float  roof_y = tStubH + inNumFloors * tFloorH;
 	Body  *roof   = addBody(RVec3(0, roof_y, 0), Quat::sIdentity(), s_roof,
-		EMotionType::Dynamic, Layers::STRUCTURE, 500.0f);
+		EMotionType::Dynamic, Layers::MOVING, 500.0f);
 	regElem(roof, RVec3(0, roof_y, 0), Vec3(inRadius, 0.1f, inRadius), cFracturePieces, true);
 	for (int k = 0; k < inNumSides; ++k)
 		frameC(cols[k][inNumFloors - 1], roof);

@@ -6,6 +6,7 @@
 
 #include <Tests/Test.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Body/BodyID.h>
@@ -72,6 +73,7 @@ private:
 	void					BuildTower(RVec3Arg inCenter, int inNumFloors, float inRadius, int inNumSides);
 	void					BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inFloorsPerSeg, float inHalfW, float inHalfD);
 	void					CheckStructuralIntegrity();
+	void					CheckGravitationalMoment();
 	void					SpawnFracture(BodyID inPanelID);
 
 	struct ProjectileRecord { BodyID mID; float mLifeRemaining; };
@@ -90,6 +92,14 @@ private:
 	UnorderedMap<FixedConstraint *, int>				mFrameIdx;
 	UnorderedMap<FixedConstraint *, int>				mPanelIdx;
 
+	// Deformation failure: rest-pose relative rotation and accumulated bend damage per frame constraint.
+	UnorderedMap<FixedConstraint *, Quat>				mConstraintRestRot;
+	UnorderedMap<FixedConstraint *, float>				mConstraintBendDmg;
+
+	// Two-phase break: FixedConstraint fails → PointConstraint lets the structure lean → expires.
+	struct BendJoint { Ref<PointConstraint> mConstraint; float mLifetime; };
+	Array<BendJoint>									mBendJoints;
+
 	// Per-chunk accumulated damage (N·s). Filled from mPendingDamage each frame.
 	UnorderedMap<BodyID, float>							mChunkDamage;
 
@@ -104,6 +114,7 @@ private:
 	// Swap-and-pop removal of the constraint at inPos; updates all indices.
 	void					UntrackConstraint(bool inIsFrame, int inPos);
 
+	uint32					mNextBuildingGroupID = 1;	// unique per-building so inter-building collision passes GroupFilterTable
 	int						mInitialPanelCount = 0;
 	int						mInitialFrameCount = 0;
 	float					mLastBreakCheckUs = 0.0f;
@@ -115,4 +126,7 @@ private:
 
 	static float			sPanelBreakForce;
 	static float			sFrameBreakForce;
+	static float			sFrameBreakMoment;    // gravitational bending moment threshold (N·m)
+	static float			sFrameBreakAxial;     // gravitational axial force threshold (N) for bridge constraints
+	static float			sFrameBendThreshold;  // accumulated radian-seconds of bend before a constraint snaps
 };

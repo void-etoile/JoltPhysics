@@ -7,6 +7,7 @@
 #include <Tests/General/DestructibleTest.h>
 #include <Jolt/Core/UnorderedMap.h>
 #include <Jolt/Core/UnorderedSet.h>
+#include <Jolt/Physics/Body/BodyLock.h>
 #include <chrono>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
@@ -43,6 +44,12 @@ void DestructibleTest::TrackConstraint(bool inIsFrame, Body *inA, Body *inB)
 	cnt[id2]++;
 	adj[id1].push_back(c);
 	adj[id2].push_back(c);
+
+	if (inIsFrame)
+	{
+		mConstraintRestRot[c.GetPtr()] = inA->GetRotation().Conjugated() * inB->GetRotation();
+		mConstraintBendDmg[c.GetPtr()] = 0.0f;
+	}
 }
 
 void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
@@ -53,6 +60,11 @@ void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
 	UnorderedMap<FixedConstraint *, int> &idx                = inIsFrame ? mFrameIdx         : mPanelIdx;
 
 	FixedConstraint *c = arr[inPos].GetPtr();
+	if (inIsFrame)
+	{
+		mConstraintRestRot.erase(c);
+		mConstraintBendDmg.erase(c);
+	}
 	BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
 
 	if (--cnt[id1] == 0) cnt.erase(id1);
@@ -94,8 +106,11 @@ void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
 // Statics
 // ---------------------------------------------------------------------------
 
-float DestructibleTest::sPanelBreakForce =   50.0f;
-float DestructibleTest::sFrameBreakForce =  500.0f;
+float DestructibleTest::sPanelBreakForce    =    50.0f;
+float DestructibleTest::sFrameBreakForce    =   500.0f;
+float DestructibleTest::sFrameBreakMoment   =  8000.0f;
+float DestructibleTest::sFrameBreakAxial    = 10000.0f;
+float DestructibleTest::sFrameBendThreshold =     1.0f; // rad·s — sustained bend × time before a frame constraint snaps
 
 // ---------------------------------------------------------------------------
 // Initialize
@@ -116,7 +131,11 @@ void DestructibleTest::Initialize()
 	mPanelAdj.clear();
 	mFrameIdx.clear();
 	mPanelIdx.clear();
+	mConstraintRestRot.clear();
+	mConstraintBendDmg.clear();
+	mBendJoints.clear();
 	mChunkDamage.clear();
+	mNextBuildingGroupID = 1;
 	{
 		std::lock_guard<std::mutex> lock(mDamageMutex);
 		mPendingDamage.clear();
@@ -367,6 +386,157 @@ void DestructibleTest::CheckStructuralIntegrity()
 }
 
 // ---------------------------------------------------------------------------
+// CheckGravitationalMoment
+// For each frame constraint that is a structural bridge (sole path from ground
+// to a hanging subtree), compute the gravitational bending moment:
+//   M = total_hanging_mass * g * horizontal_COM_offset_from_constraint
+// If M > sFrameBreakMoment the constraint snaps.  This is purely geometric —
+// immune to solver-impulse spikes from projectile impacts.
+// ---------------------------------------------------------------------------
+
+void DestructibleTest::CheckGravitationalMoment()
+{
+	if (mFrameConstraints.empty())
+		return;
+
+	static constexpr float cGravity = 9.81f;
+
+	// Build adjacency: bodyID → list of constraint indices
+	UnorderedMap<BodyID, Array<int>> adj;
+	adj.reserve((uint32)mFrameConstraints.size() * 2);
+	for (int i = 0; i < (int)mFrameConstraints.size(); ++i)
+	{
+		FixedConstraint *c = mFrameConstraints[i];
+		adj[c->GetBody1()->GetID()].push_back(i);
+		adj[c->GetBody2()->GetID()].push_back(i);
+	}
+
+	// BFS from ground to find reachable set in the full graph
+	UnorderedSet<BodyID> groundReachable;
+	{
+		Array<BodyID> queue;
+		for (auto &kv : adj)
+			if (mBodyInterface->GetMotionType(kv.first) == EMotionType::Static)
+				if (groundReachable.insert(kv.first).second)
+					queue.push_back(kv.first);
+		for (int qi = 0; qi < (int)queue.size(); ++qi)
+		{
+			BodyID cur = queue[qi];
+			auto it = adj.find(cur);
+			if (it == adj.end()) continue;
+			for (int ci : it->second)
+			{
+				FixedConstraint *c = mFrameConstraints[ci];
+				BodyID other = (c->GetBody1()->GetID() == cur) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
+				if (groundReachable.insert(other).second)
+					queue.push_back(other);
+			}
+		}
+	}
+
+	const BodyLockInterfaceLocking &bli = mPhysicsSystem->GetBodyLockInterface();
+
+	Array<int> toBreak;
+
+	for (int ci = 0; ci < (int)mFrameConstraints.size(); ++ci)
+	{
+		FixedConstraint *c = mFrameConstraints[ci];
+		BodyID idA = c->GetBody1()->GetID();
+		BodyID idB = c->GetBody2()->GetID();
+
+		// At least one side must be ground-reachable for this to be a load-bearing joint
+		bool aGround = groundReachable.find(idA) != groundReachable.end();
+		bool bGround = groundReachable.find(idB) != groundReachable.end();
+		if (!aGround && !bGround) continue;
+
+		// The "upper" side is the endpoint higher in world space (Y)
+		RVec3 posA = mBodyInterface->GetCenterOfMassPosition(idA);
+		RVec3 posB = mBodyInterface->GetCenterOfMassPosition(idB);
+		BodyID upperID = (posA.GetY() >= posB.GetY()) ? idA : idB;
+		BodyID lowerID = (posA.GetY() >= posB.GetY()) ? idB : idA;
+
+		// Skip if the lower side isn't ground-connected (we'd be checking the wrong direction)
+		if (groundReachable.find(lowerID) == groundReachable.end()) continue;
+
+		// BFS from upperID excluding constraint ci: can we still reach ground?
+		// If yes → not a bridge → skip.  If no → bridge → compute hanging subtree.
+		UnorderedSet<BodyID> fromUpper;
+		Array<BodyID> queue;
+		fromUpper.insert(upperID);
+		queue.push_back(upperID);
+		bool reachesGround = (mBodyInterface->GetMotionType(upperID) == EMotionType::Static);
+
+		for (int qi = 0; qi < (int)queue.size() && !reachesGround; ++qi)
+		{
+			BodyID cur = queue[qi];
+			auto it = adj.find(cur);
+			if (it == adj.end()) continue;
+			for (int cj : it->second)
+			{
+				if (cj == ci) continue; // exclude this constraint
+				FixedConstraint *oc = mFrameConstraints[cj];
+				BodyID other = (oc->GetBody1()->GetID() == cur) ? oc->GetBody2()->GetID() : oc->GetBody1()->GetID();
+				if (fromUpper.insert(other).second)
+				{
+					if (mBodyInterface->GetMotionType(other) == EMotionType::Static)
+						reachesGround = true;
+					queue.push_back(other);
+				}
+			}
+		}
+
+		if (reachesGround) continue; // redundant support — not a bridge
+
+		// fromUpper is the hanging subtree.  Compute total mass and COM.
+		float totalMass = 0.0f;
+		Vec3  comSum    = Vec3::sZero();
+		RVec3 attachPt  = (posA + posB) * 0.5f; // midpoint used as pivot
+
+		for (BodyID bid : fromUpper)
+		{
+			RVec3 pos = mBodyInterface->GetCenterOfMassPosition(bid);
+			float mass = 0.0f;
+			{
+				BodyLockRead lock(bli, bid);
+				if (lock.Succeeded() && lock.GetBody().IsDynamic())
+					mass = 1.0f / lock.GetBody().GetMotionProperties()->GetInverseMass();
+			}
+			if (mass <= 0.0f) continue;
+			totalMass += mass;
+			comSum    += Vec3(pos - attachPt) * mass;
+		}
+
+		if (totalMass <= 0.0f) continue;
+
+		Vec3  comOffset     = comSum / totalMass;
+		float horizOffset   = Vec3(comOffset.GetX(), 0.0f, comOffset.GetZ()).Length();
+		float axialForce    = totalMass * cGravity;
+		float bendingMoment = axialForce * horizOffset;
+
+		if (mLogFile)
+		{
+			fprintf(mLogFile, "[BRIDGE ci=%d] subtree=%d totalMass=%.0f axial=%.0f moment=%.0f horizOff=%.2f (axialThresh=%.0f momentThresh=%.0f)\n",
+				ci, (int)fromUpper.size(), totalMass, axialForce, bendingMoment, horizOffset, sFrameBreakAxial, sFrameBreakMoment);
+			fflush(mLogFile);
+		}
+
+		if (bendingMoment > sFrameBreakMoment || axialForce > sFrameBreakAxial)
+			toBreak.push_back(ci);
+	}
+
+	// Remove in reverse index order so earlier removals don't shift later indices
+	for (int i = (int)toBreak.size() - 1; i >= 0; --i)
+	{
+		int ci = toBreak[i];
+		if (ci >= (int)mFrameConstraints.size()) continue;
+		FixedConstraint *c = mFrameConstraints[ci];
+		mBodyInterface->ActivateBody(c->GetBody1()->GetID());
+		mBodyInterface->ActivateBody(c->GetBody2()->GetID());
+		UntrackConstraint(true, ci);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // PrePhysicsUpdate
 // ---------------------------------------------------------------------------
 
@@ -502,15 +672,81 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		else ++i;
 	}
 
+	// ---- Deformation failure: break frame constraints bent beyond tolerance ----
+	{
+		static constexpr float cBendDeadband = 0.05f; // ~3° — ignore solver micro-drift
+		const float dt = inParams.mDeltaTime;
+		for (int i = (int)mFrameConstraints.size() - 1; i >= 0; --i)
+		{
+			FixedConstraint *c = mFrameConstraints[i].GetPtr();
+			Body *b1 = c->GetBody1(), *b2 = c->GetBody2();
+			if (!b1->IsActive() && !b2->IsActive()) continue;
+
+			auto restIt = mConstraintRestRot.find(c);
+			if (restIt == mConstraintRestRot.end()) continue;
+
+			Quat currentRel = b1->GetRotation().Conjugated() * b2->GetRotation();
+			Quat delta      = restIt->second.Conjugated() * currentRel;
+			float bendAngle = 2.0f * acosf(JPH::Clamp(delta.GetW(), -1.0f, 1.0f));
+			float excess    = JPH::max(bendAngle - cBendDeadband, 0.0f);
+
+			float &bdmg = mConstraintBendDmg[c];
+			bdmg += excess * dt;
+
+			if (bdmg > sFrameBendThreshold)
+			{
+				// Phase 1: release rotation but keep position — lets the structure lean visibly.
+				PointConstraintSettings pcs;
+				pcs.mPoint1 = pcs.mPoint2 = (b1->GetCenterOfMassPosition() + b2->GetCenterOfMassPosition()) * Real(0.5f);
+				Ref<PointConstraint> pc = StaticCast<PointConstraint>(pcs.Create(*b1, *b2));
+				mPhysicsSystem->AddConstraint(pc);
+				mBendJoints.push_back({ pc, 0.6f });
+
+				mBodyInterface->ActivateBody(b1->GetID());
+				mBodyInterface->ActivateBody(b2->GetID());
+				UntrackConstraint(true, i);
+			}
+		}
+	}
+
 	// ---- Structural integrity: BFS from ground, detach floating chunks ----
 	CheckStructuralIntegrity();
+
+	// ---- Gravitational moment: sever bridge constraints bent beyond their capacity ----
+	CheckGravitationalMoment();
+
+	// ---- Expire bend joints (point-only joints inserted during lean phase) ----
+	{
+		const float dt = inParams.mDeltaTime;
+		for (int i = (int)mBendJoints.size() - 1; i >= 0; --i)
+		{
+			mBendJoints[i].mLifetime -= dt;
+			if (mBendJoints[i].mLifetime <= 0.0f)
+			{
+				PointConstraint *pc = mBendJoints[i].mConstraint.GetPtr();
+				mBodyInterface->ActivateBody(pc->GetBody1()->GetID());
+				mBodyInterface->ActivateBody(pc->GetBody2()->GetID());
+				mPhysicsSystem->RemoveConstraint(pc);
+				mBendJoints.erase(mBendJoints.begin() + i);
+			}
+		}
+	}
 
 	// ---- Fracture bodies that have lost all their constraints ----
 	if (!mFractureData.empty())
 	{
+		// Bodies still in the lean phase should not fracture yet.
+		UnorderedSet<BodyID> inLeanPhase;
+		for (auto &bj : mBendJoints)
+		{
+			inLeanPhase.insert(bj.mConstraint->GetBody1()->GetID());
+			inLeanPhase.insert(bj.mConstraint->GetBody2()->GetID());
+		}
+
 		Array<BodyID> to_fracture;
 		for (auto &kv : mFractureData)
 		{
+			if (inLeanPhase.find(kv.first) != inLeanPhase.end()) continue;
 			const UnorderedMap<BodyID, int> &cnt = kv.second.mIsFrame ? mFrameConnCount : mPanelConnCount;
 			if (cnt.find(kv.first) == cnt.end())
 				to_fracture.push_back(kv.first);
@@ -550,6 +786,15 @@ void DestructibleTest::CreateSettingsMenu(DebugUI *inUI, UIElement *inSubMenu)
 
 	inUI->CreateSlider(inSubMenu, "Frame Break Force (N\xc2\xb7s)", sFrameBreakForce, 100.0f, 2000.0f, 50.0f,
 		[](float inValue) { sFrameBreakForce = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Frame Break Moment (N\xc2\xb7m)", sFrameBreakMoment, 500.0f, 50000.0f, 500.0f,
+		[](float inValue) { sFrameBreakMoment = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Frame Break Axial (N)", sFrameBreakAxial, 1000.0f, 100000.0f, 1000.0f,
+		[](float inValue) { sFrameBreakAxial = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Frame Bend Threshold (rad\xc2\xb7s)", sFrameBendThreshold, 0.1f, 5.0f, 0.1f,
+		[](float inValue) { sFrameBendThreshold = inValue; });
 
 	inUI->CreateTextButton(inSubMenu, "Reset", [this]() { RestartTest(); });
 }
