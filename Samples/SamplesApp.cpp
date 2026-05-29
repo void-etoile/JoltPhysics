@@ -734,7 +734,7 @@ SamplesApp::SamplesApp(const String &inCommandLine) :
 	else
 	{
 		// Otherwise start default test
-		StartTest(JPH_RTTI(CreateRigTest));
+		StartTest(JPH_RTTI(DestructibleTest));
 	}
 }
 
