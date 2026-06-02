@@ -557,6 +557,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 	RefConst<Shape> s_pwf  = new BoxShape(Vec3(inHalfW - 0.2f, panHalfH, 0.05f));
 	RefConst<Shape> s_pws  = new BoxShape(Vec3(0.05f, panHalfH, inHalfD - 0.2f));
 	RefConst<Shape> s_roof = new BoxShape(Vec3(inHalfW - 0.1f, 0.1f, inHalfD - 0.1f));
+	RefConst<Shape> s_flr  = new BoxShape(Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f));
 
 	Ref<GroupFilterTable> apt_filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
@@ -655,6 +656,11 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 		panelC(cBL, pb); panelC(cBR, pb);
 		panelC(cFL, pl); panelC(cBL, pl);
 		panelC(cFR, pr); panelC(cBR, pr);
+
+		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 200.0f);
+		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, true);
+		frameC(bf, flr); frameC(bb, flr);
+		frameC(bl, flr); frameC(br, flr);
 	}
 
 	float roof_y = aStubH + inNumFloors * aFloorH;
@@ -688,6 +694,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 	RefConst<Shape> s_pwf  = new BoxShape(Vec3(inHalfW - 0.2f,  panHalfH, 0.05f));
 	RefConst<Shape> s_pws  = new BoxShape(Vec3(0.05f,           panHalfH, inHalfD - 0.2f));
 	RefConst<Shape> s_roof = new BoxShape(Vec3(inHalfW - 0.1f,  0.1f,    inHalfD - 0.1f));
+	RefConst<Shape> s_flr  = new BoxShape(Vec3(inHalfW - 0.1f,  0.08f,   inHalfD - 0.1f));
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
@@ -788,6 +795,11 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 		panelC(cBL, pb); panelC(cBR, pb);
 		panelC(cFL, pl); panelC(cBL, pl);
 		panelC(cFR, pr); panelC(cBR, pr);
+
+		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 300.0f);
+		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, true);
+		frameC(bf, flr); frameC(bb, flr);
+		frameC(bl, flr); frameC(br, flr);
 	}
 
 	float  roof_y = hStubH + float(numSegs) * segH;
@@ -833,6 +845,31 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 	RefConst<Shape> s_roof = roof_result.IsValid()
 		? roof_result.Get()
 		: (RefConst<Shape>)new BoxShape(Vec3(inRadius * 0.85f, 0.1f, inRadius * 0.85f));
+
+	// Floor slab shape — same octagonal cross-section, slightly thinner than roof
+	Array<Vec3> floor_verts;
+	floor_verts.reserve(inNumSides * 2);
+	for (int k = 0; k < inNumSides; ++k)
+	{
+		float a  = k * angleStep;
+		float rx = (inRadius - 0.1f) * cosf(a);
+		float rz = (inRadius - 0.1f) * sinf(a);
+		floor_verts.push_back(Vec3(rx, -0.08f, rz));
+		floor_verts.push_back(Vec3(rx,  0.08f, rz));
+	}
+	auto floor_hull = ConvexHullShapeSettings(floor_verts.data(), (int)floor_verts.size(), 0.0f).Create();
+	RefConst<Shape> s_floor = floor_hull.IsValid()
+		? floor_hull.Get()
+		: (RefConst<Shape>)new BoxShape(Vec3(inRadius * 0.85f, 0.08f, inRadius * 0.85f));
+
+	// Precompute fracture boundary polygon (XZ vertices of the octagonal slab)
+	Array<Pt2> floorPoly;
+	floorPoly.reserve(inNumSides);
+	for (int k = 0; k < inNumSides; ++k)
+	{
+		float a = k * angleStep;
+		floorPoly.push_back({ (inRadius - 0.1f) * cosf(a), (inRadius - 0.1f) * sinf(a) });
+	}
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
@@ -901,6 +938,8 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 		float beam_y  = tStubH + (f + 1) * tFloorH;
 		float panel_y = tStubH + colHalf + f * tFloorH;
 
+		Array<Body *> ringBeams;
+		ringBeams.reserve(inNumSides);
 		for (int k = 0; k < inNumSides; ++k)
 		{
 			int   kn  = (k + 1) % inNumSides;
@@ -919,6 +958,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 			regElem(beam, RVec3(bx, beam_y, bz), Vec3(chordHalf - 0.12f, 0.1f, 0.1f), 3, true);
 			frameC(cols[k][f], beam);
 			frameC(cols[kn][f], beam);
+			ringBeams.push_back(beam);
 
 			Body *panel = addBody(RVec3(bx, panel_y, bz), rot, s_panel,
 				EMotionType::Dynamic, Layers::MOVING, 20.0f);
@@ -926,6 +966,22 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 			panelC(cols[k][f], panel);
 			panelC(cols[kn][f], panel);
 		}
+
+		// Octagonal floor slab spanning the interior at beam level
+		Body *flr = addBody(RVec3(0, beam_y, 0), Quat::sIdentity(), s_floor,
+			EMotionType::Dynamic, Layers::MOVING, 300.0f);
+		{
+			RVec3 wp = inCenter + RVec3(0, beam_y, 0);
+			uint32 fseed = uint32(int(float(wp.GetX()) * 100.0f) * 73856093u
+				^ int(float(wp.GetY()) * 100.0f) * 19349663u
+				^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
+			FractureInfo finfo;
+			finfo.mIsFrame = true;
+			sGenerateFractureShapesPoly(floorPoly, 0.08f, fseed, cFracturePieces, finfo.mShapes, finfo.mLocalCenters);
+			mFractureData[flr->GetID()] = finfo;
+		}
+		for (Body *b : ringBeams)
+			frameC(b, flr);
 	}
 
 	float  roof_y = tStubH + inNumFloors * tFloorH;
