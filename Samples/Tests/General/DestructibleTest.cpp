@@ -196,9 +196,12 @@ float DestructibleTest::sPanelBreakForce     =    50.0f;
 float DestructibleTest::sFrameBreakForce     =   500.0f;
 float DestructibleTest::sFrameBreakMoment    =  5000.0f;  // N·m — motor yield torque; baked at constraint creation
 float DestructibleTest::sFrameBreakAxial     =  2000.0f;  // N  — lateral shear force to break a joint
-float DestructibleTest::sFrameBendThreshold  =     0.50f; // rad — safety-net angle (rarely fires)
+float DestructibleTest::sFrameBendThreshold  =     0.20f; // rad — break angle threshold (secondary to CheckSupportStability)
 float DestructibleTest::sFrameSpringStiffness = 500000.0f; // N·m/rad
-float DestructibleTest::sFrameSpringDamping  =  50000.0f;  // N·m·s/rad
+// High damping: motor saturates (hits yield limit) at ~1 deg/s so any motion
+// drives full opposing torque — no underdamped spring bounce.
+float DestructibleTest::sFrameSpringDamping  = 300000.0f;  // N·m·s/rad
+float DestructibleTest::sFrameSwayBreakRate  =     1.0f;   // rad/s — snap joints that are already whipping
 
 // ---------------------------------------------------------------------------
 // Initialize
@@ -990,21 +993,37 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			Quat  delta      = restIt->second.Conjugated() * currentRel;
 			float bendAngle  = 2.0f * acosf(JPH::Clamp(abs(delta.GetW()), 0.0f, 1.0f));
 
+			// Relative angular speed: if the joint is already whipping fast, snap it immediately
+			// rather than waiting for angle accumulation to reach the threshold.
+			float swayRate = (b2->GetAngularVelocity() - b1->GetAngularVelocity()).Length();
+
 			if (mLogFile && bendAngle > 0.02f)
 			{
 				RVec3 p = b1->GetCenterOfMassPosition();
-				fprintf(mLogFile, "[ANGLE] %.4f rad  pos=(%.1f,%.1f,%.1f)\n",
-					bendAngle, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
+				fprintf(mLogFile, "[ANGLE] %.4f rad  sway=%.3f rad/s  pos=(%.1f,%.1f,%.1f)\n",
+					bendAngle, swayRate, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 				fflush(mLogFile);
 			}
 
-			if (bendAngle > sFrameBendThreshold)
+			// Ground-level joints (Y < 4 m) use a lower break threshold: equilibrium deformation
+			// for a 3-story under asymmetric load is ~0.087 rad, so 0.07 rad fires just before
+			// that.  Upper joints in tall buildings need more deformation before breaking, giving
+			// the building time to visibly lean before the base gives way.
+			float jointY = JPH::min((float)b1->GetCenterOfMassPosition().GetY(),
+			                        (float)b2->GetCenterOfMassPosition().GetY());
+			static constexpr float cGroundThreshold = 0.04f; // rad — ground-floor joints
+			float localThreshold = (jointY < 4.0f) ? cGroundThreshold : sFrameBendThreshold;
+
+			bool angleBreak = bendAngle > localThreshold;
+			bool swayBreak  = swayRate > sFrameSwayBreakRate && bendAngle > 0.03f;
+			if (angleBreak || swayBreak)
 			{
 				if (mLogFile)
 				{
 					RVec3 p = b1->GetCenterOfMassPosition();
-					fprintf(mLogFile, "[BREAK] angle=%.3f rad  pos=(%.1f,%.1f,%.1f)\n",
-						bendAngle, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
+					fprintf(mLogFile, "[BREAK] %s angle=%.3f rad sway=%.3f rad/s pos=(%.1f,%.1f,%.1f)\n",
+						swayBreak ? "SWAY" : "ANGLE",
+						bendAngle, swayRate, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 					fflush(mLogFile);
 				}
 				mBodyInterface->ActivateBody(b1->GetID());
@@ -1081,8 +1100,11 @@ void DestructibleTest::CreateSettingsMenu(DebugUI *inUI, UIElement *inSubMenu)
 	inUI->CreateSlider(inSubMenu, "Frame Spring Stiffness (N\xc2\xb7m/rad)", sFrameSpringStiffness, 10000.0f, 2000000.0f, 10000.0f,
 		[](float inValue) { sFrameSpringStiffness = inValue; });
 
-	inUI->CreateSlider(inSubMenu, "Frame Spring Damping (N\xc2\xb7m\xc2\xb7s/rad)", sFrameSpringDamping, 1000.0f, 200000.0f, 1000.0f,
+	inUI->CreateSlider(inSubMenu, "Frame Spring Damping (N\xc2\xb7m\xc2\xb7s/rad)", sFrameSpringDamping, 1000.0f, 1000000.0f, 10000.0f,
 		[](float inValue) { sFrameSpringDamping = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Sway Break Rate (rad/s)", sFrameSwayBreakRate, 0.1f, 5.0f, 0.1f,
+		[](float inValue) { sFrameSwayBreakRate = inValue; });
 
 	inUI->CreateTextButton(inSubMenu, "Reset", [this]() { RestartTest(); });
 }

@@ -127,4 +127,5 @@ private:
 	static float			sFrameBendThreshold;    // max deformation angle (rad) before a frame constraint breaks
 	static float			sFrameSpringStiffness;  // N·m/rad — rotational stiffness of frame joints
 	static float			sFrameSpringDamping;    // N·m·s/rad — rotational damping of frame joints
+	static float			sFrameSwayBreakRate;    // rad/s — relative angular velocity at which a joint snaps (prevents whip oscillation)
 };
