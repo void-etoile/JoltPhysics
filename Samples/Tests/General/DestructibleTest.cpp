@@ -193,6 +193,7 @@ void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
 // ---------------------------------------------------------------------------
 
 float DestructibleTest::sPanelBreakForce     =    50.0f;
+float DestructibleTest::sFloorBreakForce     =   300.0f;  // N·s — floor slabs need much more damage than thin panels
 float DestructibleTest::sFrameBreakForce     =   500.0f;
 float DestructibleTest::sFrameBreakMoment    =  5000.0f;  // N·m — motor yield torque; baked at constraint creation
 float DestructibleTest::sFrameBreakAxial     =  2000.0f;  // N  — lateral shear force to break a joint
@@ -908,7 +909,8 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		{
 			auto fit = mFractureData.find(id);
 			if (fit == mFractureData.end()) continue;
-			float threshold = fit->second.mIsFrame ? sFrameBreakForce : sPanelBreakForce;
+			float threshold = fit->second.mIsFrame ? sFrameBreakForce :
+			                  fit->second.mIsFloor ? sFloorBreakForce : sPanelBreakForce;
 			if (damage >= threshold)
 				toDestroy.push_back(id);
 		}
@@ -1102,6 +1104,9 @@ void DestructibleTest::CreateSettingsMenu(DebugUI *inUI, UIElement *inSubMenu)
 {
 	inUI->CreateSlider(inSubMenu, "Panel Break Force (N\xc2\xb7s)", sPanelBreakForce,   5.0f,   200.0f,  5.0f,
 		[](float inValue) { sPanelBreakForce = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Floor Break Force (N\xc2\xb7s)", sFloorBreakForce,  50.0f, 2000.0f, 50.0f,
+		[](float inValue) { sFloorBreakForce = inValue; });
 
 	inUI->CreateSlider(inSubMenu, "Frame Break Force (N\xc2\xb7s)", sFrameBreakForce, 100.0f, 2000.0f, 50.0f,
 		[](float inValue) { sFrameBreakForce = inValue; });

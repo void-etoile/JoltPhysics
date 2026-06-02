@@ -65,6 +65,7 @@ private:
 		Array<RefConst<Shape>>	mShapes;		// one convex hull per Voronoi cell
 		Array<Vec3>				mLocalCenters;	// centroid of each cell in panel local space
 		bool					mIsFrame = false; // true → break when frame constraints gone; false → panel constraints
+		bool					mIsFloor = false; // true → use sFloorBreakForce instead of sPanelBreakForce
 	};
 
 	void					FireProjectile(RVec3Arg inPos, Vec3Arg inDirection);
@@ -127,6 +128,7 @@ private:
 	bool					mWasFire = false;
 
 	static float			sPanelBreakForce;
+	static float			sFloorBreakForce;
 	static float			sFrameBreakForce;
 	static float			sFrameBreakMoment;      // gravitational bending moment threshold (N·m)
 	static float			sFrameBreakAxial;       // gravitational axial force threshold (N) for bridge constraints

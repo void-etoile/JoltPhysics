@@ -659,6 +659,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 
 		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 200.0f);
 		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
+		mFractureData[flr->GetID()].mIsFloor = true;
 		panelC(bf, flr); panelC(bb, flr);
 		panelC(bl, flr); panelC(br, flr);
 	}
@@ -798,6 +799,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 
 		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 300.0f);
 		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
+		mFractureData[flr->GetID()].mIsFloor = true;
 		panelC(bf, flr); panelC(bb, flr);
 		panelC(bl, flr); panelC(br, flr);
 	}
@@ -977,6 +979,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 				^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
 			FractureInfo finfo;
 			finfo.mIsFrame = false;
+			finfo.mIsFloor = true;
 			sGenerateFractureShapesPoly(floorPoly, 0.08f, fseed, cFracturePieces, finfo.mShapes, finfo.mLocalCenters);
 			mFractureData[flr->GetID()] = finfo;
 		}
