@@ -11,6 +11,7 @@
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Core/UnorderedMap.h>
+#include <Jolt/Core/UnorderedSet.h>
 #include <mutex>
 
 /// Demonstrates frame-and-infill destructible environments.
@@ -99,10 +100,15 @@ private:
 	// Per-chunk accumulated damage (N·s). Filled from mPendingDamage each frame.
 	UnorderedMap<BodyID, float>							mChunkDamage;
 
-	// Thread-safe staging buffer: OnContactAdded (physics thread) pushes here;
-	// PrePhysicsUpdate (main thread) drains it under mDamageMutex.
+	// Thread-safe staging buffers: OnContactAdded (physics thread) pushes here;
+	// PrePhysicsUpdate (main thread) drains them under mDamageMutex.
 	std::mutex										mDamageMutex;
 	Array<std::pair<BodyID, float>>					mPendingDamage;
+	Array<BodyID>									mHitProjectiles;  // projectiles that struck something this step
+
+	// Fast O(1) lookup so OnContactAdded can identify projectiles without scanning mProjectiles.
+	// Written only on the main thread (FireProjectile / expire loop); safe to read from physics thread.
+	UnorderedSet<BodyID>							mProjectileSet;
 
 	// Create a frame (SixDOFConstraint) or panel (FixedConstraint) between inA and inB, register everywhere.
 	void					TrackConstraint(bool inIsFrame, Body *inA, Body *inB);

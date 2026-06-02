@@ -658,9 +658,9 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 		panelC(cFR, pr); panelC(cBR, pr);
 
 		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 200.0f);
-		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, true);
-		frameC(bf, flr); frameC(bb, flr);
-		frameC(bl, flr); frameC(br, flr);
+		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
+		panelC(bf, flr); panelC(bb, flr);
+		panelC(bl, flr); panelC(br, flr);
 	}
 
 	float roof_y = aStubH + inNumFloors * aFloorH;
@@ -797,9 +797,9 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 		panelC(cFR, pr); panelC(cBR, pr);
 
 		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 300.0f);
-		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, true);
-		frameC(bf, flr); frameC(bb, flr);
-		frameC(bl, flr); frameC(br, flr);
+		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
+		panelC(bf, flr); panelC(bb, flr);
+		panelC(bl, flr); panelC(br, flr);
 	}
 
 	float  roof_y = hStubH + float(numSegs) * segH;
@@ -976,12 +976,12 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 				^ int(float(wp.GetY()) * 100.0f) * 19349663u
 				^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
 			FractureInfo finfo;
-			finfo.mIsFrame = true;
+			finfo.mIsFrame = false;
 			sGenerateFractureShapesPoly(floorPoly, 0.08f, fseed, cFracturePieces, finfo.mShapes, finfo.mLocalCenters);
 			mFractureData[flr->GetID()] = finfo;
 		}
 		for (Body *b : ringBeams)
-			frameC(b, flr);
+			panelC(b, flr);
 	}
 
 	float  roof_y = tStubH + inNumFloors * tFloorH;

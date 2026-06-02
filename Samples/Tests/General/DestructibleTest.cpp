@@ -216,6 +216,7 @@ void DestructibleTest::Initialize()
 	mProjectiles.clear();
 	mFire = false;
 	mWasFire = false;
+	mProjectileSet.clear();
 	mFrameConnCount.clear();
 	mPanelConnCount.clear();
 	mFrameAdj.clear();
@@ -228,6 +229,7 @@ void DestructibleTest::Initialize()
 	{
 		std::lock_guard<std::mutex> lock(mDamageMutex);
 		mPendingDamage.clear();
+		mHitProjectiles.clear();
 	}
 
 	CreateFloor();
@@ -302,6 +304,12 @@ void DestructibleTest::OnContactAdded(const Body &inBody1, const Body &inBody2,
 	std::lock_guard<std::mutex> lock(mDamageMutex);
 	mPendingDamage.push_back({ inBody1.GetID(), impulse });
 	mPendingDamage.push_back({ inBody2.GetID(), impulse });
+
+	// If either body is a projectile, schedule immediate removal.
+	// mProjectileSet is written only on the main thread between steps, so reading here is safe.
+	BodyID id1 = inBody1.GetID(), id2 = inBody2.GetID();
+	if (mProjectileSet.find(id1) != mProjectileSet.end()) mHitProjectiles.push_back(id1);
+	if (mProjectileSet.find(id2) != mProjectileSet.end()) mHitProjectiles.push_back(id2);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +341,7 @@ void DestructibleTest::FireProjectile(RVec3Arg inPos, Vec3Arg inDirection)
 
 	BodyID id = mBodyInterface->CreateAndAddBody(proj, EActivation::Activate);
 	mProjectiles.push_back({ id, 3.0f });
+	mProjectileSet.insert(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -780,12 +789,20 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		mFire = false;
 	}
 
-	// ---- Expire projectiles ----
+	// ---- Expire projectiles (lifetime OR on-impact removal) ----
+	{
+		std::lock_guard<std::mutex> lock(mDamageMutex);
+		for (BodyID hitID : mHitProjectiles)
+			for (auto &rec : mProjectiles)
+				if (rec.mID == hitID) { rec.mLifeRemaining = 0.0f; break; }
+		mHitProjectiles.clear();
+	}
 	for (int i = (int)mProjectiles.size() - 1; i >= 0; --i)
 	{
 		mProjectiles[i].mLifeRemaining -= inParams.mDeltaTime;
 		if (mProjectiles[i].mLifeRemaining <= 0.0f)
 		{
+			mProjectileSet.erase(mProjectiles[i].mID);
 			mBodyInterface->RemoveBody(mProjectiles[i].mID);
 			mBodyInterface->DestroyBody(mProjectiles[i].mID);
 			mProjectiles.erase(mProjectiles.begin() + i);
@@ -811,6 +828,7 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		{
 			if ((float)mBodyInterface->GetCenterOfMassPosition(mProjectiles[i].mID).GetY() < cFallThreshold)
 			{
+				mProjectileSet.erase(mProjectiles[i].mID);
 				mBodyInterface->RemoveBody(mProjectiles[i].mID);
 				mBodyInterface->DestroyBody(mProjectiles[i].mID);
 				mProjectiles.erase(mProjectiles.begin() + i);
