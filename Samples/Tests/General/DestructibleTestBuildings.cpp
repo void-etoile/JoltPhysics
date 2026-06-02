@@ -127,6 +127,65 @@ static void sGenerateFractureShapes(Vec3 inHalfExtents, uint32 inSeed, int inNum
 	}
 }
 
+// Like sGenerateFractureShapes but clips Voronoi cells to an arbitrary 2D polygon
+// (XZ plane) rather than a bounding rectangle.  Used for non-rectangular bodies
+// such as the octagonal tower roof.
+static void sGenerateFractureShapesPoly(const Array<Pt2> &inBoundary, float inHalfThick,
+	uint32 inSeed, int inNumPieces,
+	Array<RefConst<Shape>> &outShapes, Array<Vec3> &outLocalCenters)
+{
+	// Scatter range: bounding box of the boundary polygon
+	float h0 = 0.0f, h1 = 0.0f;
+	for (const Pt2 &p : inBoundary)
+	{
+		h0 = JPH::max(h0, JPH::abs(p.x));
+		h1 = JPH::max(h1, JPH::abs(p.y));
+	}
+
+	uint32 rng = inSeed;
+	auto nextf = [&]() -> float {
+		rng = rng * 1664525u + 1013904223u;
+		return float(rng >> 8) / float(1u << 24);
+	};
+
+	Array<Pt2> seeds(inNumPieces);
+	for (Pt2 &s : seeds)
+		s = { nextf() * 2.0f * h0 - h0, nextf() * 2.0f * h1 - h1 };
+
+	for (int i = 0; i < inNumPieces; ++i)
+	{
+		Array<Pt2> cell = inBoundary; // start from the actual shape boundary
+		for (int j = 0; j < inNumPieces && !cell.empty(); ++j)
+		{
+			if (j == i) continue;
+			float nx = seeds[j].x - seeds[i].x;
+			float ny = seeds[j].y - seeds[i].y;
+			float mx = (seeds[i].x + seeds[j].x) * 0.5f;
+			float my = (seeds[i].y + seeds[j].y) * 0.5f;
+			cell = sClipPolygon(cell, nx, ny, nx * mx + ny * my);
+		}
+		if ((int)cell.size() < 3) continue;
+
+		float cx = 0.0f, cy = 0.0f;
+		for (const Pt2 &p : cell) { cx += p.x; cy += p.y; }
+		cx /= float(cell.size()); cy /= float(cell.size());
+
+		Array<Vec3> verts;
+		verts.reserve(cell.size() * 2);
+		for (const Pt2 &p : cell)
+		{
+			verts.push_back(Vec3(p.x - cx, -inHalfThick, p.y - cy));
+			verts.push_back(Vec3(p.x - cx,  inHalfThick, p.y - cy));
+		}
+
+		auto result = ConvexHullShapeSettings(verts.data(), (int)verts.size(), 0.0f).Create();
+		if (!result.IsValid()) continue;
+
+		outShapes.push_back(result.Get());
+		outLocalCenters.push_back(Vec3(cx, 0.0f, cy));
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Main demo wall layout constants (used by BuildMainWall only)
 // ---------------------------------------------------------------------------
@@ -872,7 +931,24 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 	float  roof_y = tStubH + inNumFloors * tFloorH;
 	Body  *roof   = addBody(RVec3(0, roof_y, 0), Quat::sIdentity(), s_roof,
 		EMotionType::Dynamic, Layers::MOVING, 500.0f);
-	regElem(roof, RVec3(0, roof_y, 0), Vec3(inRadius, 0.1f, inRadius), cFracturePieces, true);
+	// Build the octagonal boundary for fracture clipping so debris matches the roof shape.
+	{
+		Array<Pt2> roofPoly;
+		roofPoly.reserve(inNumSides);
+		for (int k = 0; k < inNumSides; ++k)
+		{
+			float a = k * angleStep;
+			roofPoly.push_back({ (inRadius - 0.05f) * cosf(a), (inRadius - 0.05f) * sinf(a) });
+		}
+		RVec3 wp = inCenter + RVec3(0, roof_y, 0);
+		uint32 seed = uint32(int(float(wp.GetX()) * 100.0f) * 73856093u
+			^ int(float(wp.GetY()) * 100.0f) * 19349663u
+			^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
+		FractureInfo info;
+		info.mIsFrame = true;
+		sGenerateFractureShapesPoly(roofPoly, 0.1f, seed, cFracturePieces, info.mShapes, info.mLocalCenters);
+		mFractureData[roof->GetID()] = info;
+	}
 	for (int k = 0; k < inNumSides; ++k)
 		frameC(cols[k][inNumFloors - 1], roof);
 }
