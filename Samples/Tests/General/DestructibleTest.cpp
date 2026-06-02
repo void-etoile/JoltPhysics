@@ -11,6 +11,7 @@
 #include <chrono>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/SixDOFConstraint.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Application/DebugUI.h>
 #include <Input/Keyboard.h>
@@ -27,90 +28,177 @@ JPH_IMPLEMENT_RTTI_VIRTUAL(DestructibleTest)
 
 void DestructibleTest::TrackConstraint(bool inIsFrame, Body *inA, Body *inB)
 {
-	FixedConstraintSettings s;
-	s.mAutoDetectPoint = true;
-	Ref<FixedConstraint> c = StaticCast<FixedConstraint>(s.Create(*inA, *inB));
-	mPhysicsSystem->AddConstraint(c);
-
-	Array<Ref<FixedConstraint>> &arr                         = inIsFrame ? mFrameConstraints : mPanelConstraints;
-	UnorderedMap<BodyID, int> &cnt                           = inIsFrame ? mFrameConnCount   : mPanelConnCount;
-	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>> &adj   = inIsFrame ? mFrameAdj         : mPanelAdj;
-	UnorderedMap<FixedConstraint *, int> &idx                = inIsFrame ? mFrameIdx         : mPanelIdx;
-
-	idx[c.GetPtr()] = (int)arr.size();
-	arr.push_back(c);
-	BodyID id1 = inA->GetID(), id2 = inB->GetID();
-	cnt[id1]++;
-	cnt[id2]++;
-	adj[id1].push_back(c);
-	adj[id2].push_back(c);
-
 	if (inIsFrame)
 	{
-		mConstraintRestRot[c.GetPtr()] = inA->GetRotation().Conjugated() * inB->GetRotation();
-		mConstraintBendDmg[c.GetPtr()] = 0.0f;
+		// Frame joints use SixDOFConstraint with locked translation and spring rotation motors.
+		// This lets the structure physically lean under gravity before constraints break.
+		SixDOFConstraintSettings s;
+		s.mSpace = EConstraintSpace::LocalToBodyCOM;
+
+		RVec3 posA = inA->GetCenterOfMassPosition();
+		RVec3 posB = inB->GetCenterOfMassPosition();
+		Quat rotA = inA->GetRotation();
+		Quat rotB = inB->GetRotation();
+
+		// Pivot point: top of body A / bottom of body B, expressed in each body's local COM frame.
+		// This moves with the bodies so interior segments are NOT double-pinned to world positions.
+		Vec3 halfOffset = Vec3(posB - posA) * 0.5f;
+		s.mPosition1 = rotA.Conjugated() * halfOffset;
+		s.mPosition2 = rotB.Conjugated() * -halfOffset;
+
+		// Constraint axes in body-local space: use identity so the constraint frame = body1's local frame.
+		// This makes R_cs = rotA^{-1} * rotB at rest, matching SetTargetOrientationCS below.
+		s.mAxisX1 = s.mAxisX2 = Vec3::sAxisX();
+		s.mAxisY1 = s.mAxisY2 = Vec3::sAxisY();
+
+		using EA = SixDOFConstraintSettings::EAxis;
+		s.MakeFixedAxis(EA::TranslationX);
+		s.MakeFixedAxis(EA::TranslationY);
+		s.MakeFixedAxis(EA::TranslationZ);
+		s.MakeFreeAxis(EA::RotationX);
+		s.MakeFreeAxis(EA::RotationY);
+		s.MakeFreeAxis(EA::RotationZ);
+
+		for (int ax = (int)EA::RotationX; ax <= (int)EA::RotationZ; ++ax)
+		{
+			s.mMotorSettings[ax].mSpringSettings.mMode      = ESpringMode::StiffnessAndDamping;
+			s.mMotorSettings[ax].mSpringSettings.mStiffness  = sFrameSpringStiffness;
+			s.mMotorSettings[ax].mSpringSettings.mDamping    = sFrameSpringDamping;
+			// Limit motor torque so joints yield visibly under overload rather than holding rigidly.
+			// Baked at creation; change sFrameBreakMoment then restart to take effect.
+			s.mMotorSettings[ax].mMaxForceLimit                   =  sFrameBreakMoment;
+			s.mMotorSettings[ax].mMinForceLimit                   = -sFrameBreakMoment;
+		}
+
+		Ref<SixDOFConstraint> c = StaticCast<SixDOFConstraint>(s.Create(*inA, *inB));
+		mPhysicsSystem->AddConstraint(c);
+
+		using EC = SixDOFConstraint::EAxis;
+		c->SetMotorState(EC::RotationX, EMotorState::Position);
+		c->SetMotorState(EC::RotationY, EMotorState::Position);
+		c->SetMotorState(EC::RotationZ, EMotorState::Position);
+		c->SetTargetOrientationCS(rotA.Conjugated() * rotB);
+
+		mFrameIdx[c.GetPtr()] = (int)mFrameConstraints.size();
+		mFrameConstraints.push_back(c);
+		BodyID id1 = inA->GetID(), id2 = inB->GetID();
+		mFrameConnCount[id1]++;
+		mFrameConnCount[id2]++;
+		mFrameAdj[id1].push_back(c);
+		mFrameAdj[id2].push_back(c);
+		mConstraintRestRot[c.GetPtr()] = rotA.Conjugated() * rotB;
+	}
+	else
+	{
+		FixedConstraintSettings s;
+		s.mAutoDetectPoint = true;
+		Ref<FixedConstraint> c = StaticCast<FixedConstraint>(s.Create(*inA, *inB));
+		mPhysicsSystem->AddConstraint(c);
+
+		mPanelIdx[c.GetPtr()] = (int)mPanelConstraints.size();
+		mPanelConstraints.push_back(c);
+		BodyID id1 = inA->GetID(), id2 = inB->GetID();
+		mPanelConnCount[id1]++;
+		mPanelConnCount[id2]++;
+		mPanelAdj[id1].push_back(c);
+		mPanelAdj[id2].push_back(c);
 	}
 }
 
 void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
 {
-	Array<Ref<FixedConstraint>> &arr                         = inIsFrame ? mFrameConstraints : mPanelConstraints;
-	UnorderedMap<BodyID, int> &cnt                           = inIsFrame ? mFrameConnCount   : mPanelConnCount;
-	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>> &adj   = inIsFrame ? mFrameAdj         : mPanelAdj;
-	UnorderedMap<FixedConstraint *, int> &idx                = inIsFrame ? mFrameIdx         : mPanelIdx;
-
-	FixedConstraint *c = arr[inPos].GetPtr();
 	if (inIsFrame)
 	{
+		SixDOFConstraint *c = mFrameConstraints[inPos].GetPtr();
 		mConstraintRestRot.erase(c);
-		mConstraintBendDmg.erase(c);
-	}
-	BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
+		BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
 
-	if (--cnt[id1] == 0) cnt.erase(id1);
-	if (--cnt[id2] == 0) cnt.erase(id2);
+		if (--mFrameConnCount[id1] == 0) mFrameConnCount.erase(id1);
+		if (--mFrameConnCount[id2] == 0) mFrameConnCount.erase(id2);
 
-	auto removeAdj = [&](BodyID id)
-	{
-		auto it = adj.find(id);
-		if (it == adj.end()) return;
-		Array<Ref<FixedConstraint>> &list = it->second;
-		for (int j = 0; j < (int)list.size(); ++j)
+		auto removeAdj = [&](BodyID id)
 		{
-			if (list[j].GetPtr() == c)
+			auto it = mFrameAdj.find(id);
+			if (it == mFrameAdj.end()) return;
+			Array<Ref<SixDOFConstraint>> &list = it->second;
+			for (int j = 0; j < (int)list.size(); ++j)
 			{
-				if (j + 1 < (int)list.size())
-					list[j] = std::move(list.back());
-				list.pop_back();
-				break;
+				if (list[j].GetPtr() == c)
+				{
+					if (j + 1 < (int)list.size())
+						list[j] = std::move(list.back());
+					list.pop_back();
+					break;
+				}
 			}
+			if (list.empty()) mFrameAdj.erase(it);
+		};
+		removeAdj(id1);
+		removeAdj(id2);
+
+		mFrameIdx.erase(c);
+		mPhysicsSystem->RemoveConstraint(c);
+
+		int last = (int)mFrameConstraints.size() - 1;
+		if (inPos != last)
+		{
+			mFrameConstraints[inPos] = std::move(mFrameConstraints[last]);
+			mFrameIdx[mFrameConstraints[inPos].GetPtr()] = inPos;
 		}
-		if (list.empty()) adj.erase(it);
-	};
-	removeAdj(id1);
-	removeAdj(id2);
-
-	idx.erase(c);
-	mPhysicsSystem->RemoveConstraint(c);
-
-	int last = (int)arr.size() - 1;
-	if (inPos != last)
-	{
-		arr[inPos] = std::move(arr[last]);
-		idx[arr[inPos].GetPtr()] = inPos;
+		mFrameConstraints.pop_back();
 	}
-	arr.pop_back();
+	else
+	{
+		FixedConstraint *c = mPanelConstraints[inPos].GetPtr();
+		BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
+
+		if (--mPanelConnCount[id1] == 0) mPanelConnCount.erase(id1);
+		if (--mPanelConnCount[id2] == 0) mPanelConnCount.erase(id2);
+
+		auto removeAdj = [&](BodyID id)
+		{
+			auto it = mPanelAdj.find(id);
+			if (it == mPanelAdj.end()) return;
+			Array<Ref<FixedConstraint>> &list = it->second;
+			for (int j = 0; j < (int)list.size(); ++j)
+			{
+				if (list[j].GetPtr() == c)
+				{
+					if (j + 1 < (int)list.size())
+						list[j] = std::move(list.back());
+					list.pop_back();
+					break;
+				}
+			}
+			if (list.empty()) mPanelAdj.erase(it);
+		};
+		removeAdj(id1);
+		removeAdj(id2);
+
+		mPanelIdx.erase(c);
+		mPhysicsSystem->RemoveConstraint(c);
+
+		int last = (int)mPanelConstraints.size() - 1;
+		if (inPos != last)
+		{
+			mPanelConstraints[inPos] = std::move(mPanelConstraints[last]);
+			mPanelIdx[mPanelConstraints[inPos].GetPtr()] = inPos;
+		}
+		mPanelConstraints.pop_back();
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Statics
 // ---------------------------------------------------------------------------
 
-float DestructibleTest::sPanelBreakForce    =    50.0f;
-float DestructibleTest::sFrameBreakForce    =   500.0f;
-float DestructibleTest::sFrameBreakMoment   =  8000.0f;
-float DestructibleTest::sFrameBreakAxial    = 10000.0f;
-float DestructibleTest::sFrameBendThreshold =     1.0f; // rad·s — sustained bend × time before a frame constraint snaps
+float DestructibleTest::sPanelBreakForce     =    50.0f;
+float DestructibleTest::sFrameBreakForce     =   500.0f;
+float DestructibleTest::sFrameBreakMoment    =  5000.0f;  // N·m — motor yield torque; baked at constraint creation
+float DestructibleTest::sFrameBreakAxial     =  2000.0f;  // N  — lateral shear force to break a joint
+float DestructibleTest::sFrameBendThreshold  =     0.50f; // rad — safety-net angle (rarely fires)
+float DestructibleTest::sFrameSpringStiffness = 500000.0f; // N·m/rad
+float DestructibleTest::sFrameSpringDamping  =  50000.0f;  // N·m·s/rad
 
 // ---------------------------------------------------------------------------
 // Initialize
@@ -132,8 +220,6 @@ void DestructibleTest::Initialize()
 	mFrameIdx.clear();
 	mPanelIdx.clear();
 	mConstraintRestRot.clear();
-	mConstraintBendDmg.clear();
-	mBendJoints.clear();
 	mChunkDamage.clear();
 	mNextBuildingGroupID = 1;
 	{
@@ -294,26 +380,41 @@ void DestructibleTest::SpawnFracture(BodyID inPanelID)
 			mShardBodies.push_back(id);
 	}
 
-	// Remove all constraints referencing this body via adjacency — O(degree).
-	auto cleanByAdj = [&](bool inIsFrame)
+	// Remove all frame constraints referencing this body via adjacency — O(degree).
 	{
-		UnorderedMap<BodyID, Array<Ref<FixedConstraint>>> &adjMap = inIsFrame ? mFrameAdj : mPanelAdj;
-		UnorderedMap<FixedConstraint *, int> &idxMap = inIsFrame ? mFrameIdx : mPanelIdx;
-		auto adjIt = adjMap.find(inPanelID);
-		if (adjIt == adjMap.end()) return;
-		Array<Ref<FixedConstraint>> toRemove = adjIt->second;
-		for (auto &cref : toRemove)
+		auto adjIt = mFrameAdj.find(inPanelID);
+		if (adjIt != mFrameAdj.end())
 		{
-			FixedConstraint *c = cref.GetPtr();
-			BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
-			mBodyInterface->ActivateBody(id1 == inPanelID ? id2 : id1);
-			auto posIt = idxMap.find(c);
-			if (posIt != idxMap.end())
-				UntrackConstraint(inIsFrame, posIt->second);
+			Array<Ref<SixDOFConstraint>> toRemove = adjIt->second;
+			for (auto &cref : toRemove)
+			{
+				SixDOFConstraint *c = cref.GetPtr();
+				BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
+				mBodyInterface->ActivateBody(id1 == inPanelID ? id2 : id1);
+				auto posIt = mFrameIdx.find(c);
+				if (posIt != mFrameIdx.end())
+					UntrackConstraint(true, posIt->second);
+			}
 		}
-	};
-	cleanByAdj(false);
-	cleanByAdj(true);
+	}
+
+	// Remove all panel constraints referencing this body via adjacency — O(degree).
+	{
+		auto adjIt = mPanelAdj.find(inPanelID);
+		if (adjIt != mPanelAdj.end())
+		{
+			Array<Ref<FixedConstraint>> toRemove = adjIt->second;
+			for (auto &cref : toRemove)
+			{
+				FixedConstraint *c = cref.GetPtr();
+				BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
+				mBodyInterface->ActivateBody(id1 == inPanelID ? id2 : id1);
+				auto posIt = mPanelIdx.find(c);
+				if (posIt != mPanelIdx.end())
+					UntrackConstraint(false, posIt->second);
+			}
+		}
+	}
 
 	mBodyInterface->RemoveBody(inPanelID);
 	mBodyInterface->DestroyBody(inPanelID);
@@ -333,7 +434,7 @@ void DestructibleTest::CheckStructuralIntegrity()
 	UnorderedMap<BodyID, Array<int>> adj;
 	for (int i = 0; i < (int)mFrameConstraints.size(); ++i)
 	{
-		FixedConstraint *c = mFrameConstraints[i];
+		SixDOFConstraint *c = mFrameConstraints[i];
 		adj[c->GetBody1()->GetID()].push_back(i);
 		adj[c->GetBody2()->GetID()].push_back(i);
 	}
@@ -353,7 +454,7 @@ void DestructibleTest::CheckStructuralIntegrity()
 		if (it == adj.end()) continue;
 		for (int ci : it->second)
 		{
-			FixedConstraint *c = mFrameConstraints[ci];
+			SixDOFConstraint *c = mFrameConstraints[ci];
 			BodyID other = (c->GetBody1()->GetID() == current) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
 			if (reachable.insert(other).second)
 				queue.push_back(other);
@@ -368,17 +469,22 @@ void DestructibleTest::CheckStructuralIntegrity()
 	if (unsupported.empty())
 		return;
 
-	for (bool isFrame : { true, false })
+	for (int i = 0; i < (int)mFrameConstraints.size(); )
 	{
-		Array<Ref<FixedConstraint>> &arr = isFrame ? mFrameConstraints : mPanelConstraints;
-		for (int i = 0; i < (int)arr.size(); )
-		{
-			FixedConstraint *c = arr[i].GetPtr();
-			if (unsupported.find(c->GetBody1()->GetID()) != unsupported.end() || unsupported.find(c->GetBody2()->GetID()) != unsupported.end())
-				UntrackConstraint(isFrame, i);
-			else
-				++i;
-		}
+		SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
+		if (unsupported.find(c->GetBody1()->GetID()) != unsupported.end() || unsupported.find(c->GetBody2()->GetID()) != unsupported.end())
+			UntrackConstraint(true, i);
+		else
+			++i;
+	}
+
+	for (int i = 0; i < (int)mPanelConstraints.size(); )
+	{
+		FixedConstraint *c = mPanelConstraints[i].GetPtr();
+		if (unsupported.find(c->GetBody1()->GetID()) != unsupported.end() || unsupported.find(c->GetBody2()->GetID()) != unsupported.end())
+			UntrackConstraint(false, i);
+		else
+			++i;
 	}
 
 	for (BodyID id : unsupported)
@@ -406,7 +512,7 @@ void DestructibleTest::CheckGravitationalMoment()
 	adj.reserve((uint32)mFrameConstraints.size() * 2);
 	for (int i = 0; i < (int)mFrameConstraints.size(); ++i)
 	{
-		FixedConstraint *c = mFrameConstraints[i];
+		SixDOFConstraint *c = mFrameConstraints[i];
 		adj[c->GetBody1()->GetID()].push_back(i);
 		adj[c->GetBody2()->GetID()].push_back(i);
 	}
@@ -426,7 +532,7 @@ void DestructibleTest::CheckGravitationalMoment()
 			if (it == adj.end()) continue;
 			for (int ci : it->second)
 			{
-				FixedConstraint *c = mFrameConstraints[ci];
+				SixDOFConstraint *c = mFrameConstraints[ci];
 				BodyID other = (c->GetBody1()->GetID() == cur) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
 				if (groundReachable.insert(other).second)
 					queue.push_back(other);
@@ -440,7 +546,7 @@ void DestructibleTest::CheckGravitationalMoment()
 
 	for (int ci = 0; ci < (int)mFrameConstraints.size(); ++ci)
 	{
-		FixedConstraint *c = mFrameConstraints[ci];
+		SixDOFConstraint *c = mFrameConstraints[ci];
 		BodyID idA = c->GetBody1()->GetID();
 		BodyID idB = c->GetBody2()->GetID();
 
@@ -474,7 +580,7 @@ void DestructibleTest::CheckGravitationalMoment()
 			for (int cj : it->second)
 			{
 				if (cj == ci) continue; // exclude this constraint
-				FixedConstraint *oc = mFrameConstraints[cj];
+				SixDOFConstraint *oc = mFrameConstraints[cj];
 				BodyID other = (oc->GetBody1()->GetID() == cur) ? oc->GetBody2()->GetID() : oc->GetBody1()->GetID();
 				if (fromUpper.insert(other).second)
 				{
@@ -529,10 +635,131 @@ void DestructibleTest::CheckGravitationalMoment()
 	{
 		int ci = toBreak[i];
 		if (ci >= (int)mFrameConstraints.size()) continue;
-		FixedConstraint *c = mFrameConstraints[ci];
+		SixDOFConstraint *c = mFrameConstraints[ci];
 		mBodyInterface->ActivateBody(c->GetBody1()->GetID());
 		mBodyInterface->ActivateBody(c->GetBody2()->GetID());
 		UntrackConstraint(true, ci);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckSupportStability
+// Fractures frame bodies that are geometrically unsupported: a body is
+// unsupported when its XZ position lies outside the bounding box of the
+// static stubs (ground-anchored segments) in its connected component.
+// This catches short structures (house, 2-storey apt) whose roofs/beams
+// overhang the remaining columns after one wall is destroyed — the bridge
+// check misses them because two support paths still exist.
+// ---------------------------------------------------------------------------
+
+void DestructibleTest::CheckSupportStability()
+{
+	if (mFractureData.empty() || mFrameConstraints.empty())
+		return;
+
+	// Build adjacency: bodyID → list of constraint indices
+	UnorderedMap<BodyID, Array<int>> adj;
+	adj.reserve((uint32)mFrameConstraints.size() * 2);
+	for (int i = 0; i < (int)mFrameConstraints.size(); ++i)
+	{
+		SixDOFConstraint *c = mFrameConstraints[i];
+		adj[c->GetBody1()->GetID()].push_back(i);
+		adj[c->GetBody2()->GetID()].push_back(i);
+	}
+
+	// BFS: find connected components; compute XZ bbox of static stubs per component.
+	struct CompInfo { float minX, maxX, minZ, maxZ; bool hasStub; };
+	UnorderedMap<BodyID, int> bodyToComp;
+	Array<CompInfo>           comps;
+	bodyToComp.reserve((uint32)adj.size());
+
+	for (auto &kv : adj)
+	{
+		BodyID seed = kv.first;
+		if (bodyToComp.find(seed) != bodyToComp.end()) continue;
+
+		int compIdx = (int)comps.size();
+		comps.push_back({ FLT_MAX, -FLT_MAX, FLT_MAX, -FLT_MAX, false });
+		CompInfo &ci = comps.back();
+
+		Array<BodyID> queue;
+		queue.push_back(seed);
+		bodyToComp[seed] = compIdx;
+
+		for (int qi = 0; qi < (int)queue.size(); ++qi)
+		{
+			BodyID cur = queue[qi];
+
+			if (mBodyInterface->GetMotionType(cur) == EMotionType::Static)
+			{
+				RVec3 pos = mBodyInterface->GetCenterOfMassPosition(cur);
+				float px = (float)pos.GetX(), pz = (float)pos.GetZ();
+				if (px < ci.minX) ci.minX = px;
+				if (px > ci.maxX) ci.maxX = px;
+				if (pz < ci.minZ) ci.minZ = pz;
+				if (pz > ci.maxZ) ci.maxZ = pz;
+				ci.hasStub = true;
+			}
+
+			auto it = adj.find(cur);
+			if (it == adj.end()) continue;
+			for (int k : it->second)
+			{
+				SixDOFConstraint *c = mFrameConstraints[k];
+				BodyID other = (c->GetBody1()->GetID() == cur) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
+				if (bodyToComp.find(other) == bodyToComp.end())
+				{
+					bodyToComp[other] = compIdx;
+					queue.push_back(other);
+				}
+			}
+		}
+	}
+
+	// Tolerance: allow a body to be slightly outside the stub bbox before fracturing.
+	// 0.5 m covers the half-width of a typical column stub so corner columns don't
+	// false-positive when the bbox is a single point.
+	static constexpr float cTol = 0.5f;
+	static constexpr int   cMaxFracturesPerFrame = 4;
+
+	Array<BodyID> toFracture;
+	for (auto &kv : mFractureData)
+	{
+		if (!kv.second.mIsFrame) continue;
+		BodyID id = kv.first;
+
+		auto compIt = bodyToComp.find(id);
+		if (compIt == bodyToComp.end()) continue;
+
+		const CompInfo &ci = comps[compIt->second];
+		if (!ci.hasStub)
+		{
+			// Entire component is floating — fracture everything
+			toFracture.push_back(id);
+			continue;
+		}
+
+		RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
+		float bx = (float)pos.GetX(), bz = (float)pos.GetZ();
+		if (bx < ci.minX - cTol || bx > ci.maxX + cTol ||
+		    bz < ci.minZ - cTol || bz > ci.maxZ + cTol)
+			toFracture.push_back(id);
+	}
+
+	int budget = cMaxFracturesPerFrame;
+	for (BodyID id : toFracture)
+	{
+		if (budget-- <= 0) break;
+		if (mFractureData.find(id) == mFractureData.end()) continue;
+		mBodyInterface->ActivateBody(id);
+		if (mLogFile)
+		{
+			RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
+			fprintf(mLogFile, "[SUPPORT] XZ-unstable fracture at (%.1f,%.1f,%.1f)\n",
+				(float)pos.GetX(),(float)pos.GetY(),(float)pos.GetZ());
+			fflush(mLogFile);
+		}
+		SpawnFracture(id);
 	}
 }
 
@@ -570,6 +797,69 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			mBodyInterface->RemoveBody(mShardBodies[i]);
 			mBodyInterface->DestroyBody(mShardBodies[i]);
 			mShardBodies.erase(mShardBodies.begin() + i);
+		}
+	}
+
+	// ---- Below-ground cleanup: remove anything that has fallen through the floor ----
+	{
+		static constexpr float cFallThreshold = -10.0f;
+
+		for (int i = (int)mProjectiles.size() - 1; i >= 0; --i)
+		{
+			if ((float)mBodyInterface->GetCenterOfMassPosition(mProjectiles[i].mID).GetY() < cFallThreshold)
+			{
+				mBodyInterface->RemoveBody(mProjectiles[i].mID);
+				mBodyInterface->DestroyBody(mProjectiles[i].mID);
+				mProjectiles.erase(mProjectiles.begin() + i);
+			}
+		}
+
+		for (int i = (int)mShardBodies.size() - 1; i >= 0; --i)
+		{
+			if ((float)mBodyInterface->GetCenterOfMassPosition(mShardBodies[i]).GetY() < cFallThreshold)
+			{
+				mBodyInterface->RemoveBody(mShardBodies[i]);
+				mBodyInterface->DestroyBody(mShardBodies[i]);
+				mShardBodies.erase(mShardBodies.begin() + i);
+			}
+		}
+
+		// Structural/panel bodies — remove constraints first, then the body itself.
+		Array<BodyID> sunken;
+		for (auto &kv : mFractureData)
+			if ((float)mBodyInterface->GetCenterOfMassPosition(kv.first).GetY() < cFallThreshold)
+				sunken.push_back(kv.first);
+
+		for (BodyID id : sunken)
+		{
+			if (mFractureData.find(id) == mFractureData.end()) continue;
+
+			auto frameIt = mFrameAdj.find(id);
+			if (frameIt != mFrameAdj.end())
+			{
+				Array<Ref<SixDOFConstraint>> cs = frameIt->second;
+				for (auto &cr : cs)
+				{
+					auto pit = mFrameIdx.find(cr.GetPtr());
+					if (pit != mFrameIdx.end())
+						UntrackConstraint(true, pit->second);
+				}
+			}
+			auto panelIt = mPanelAdj.find(id);
+			if (panelIt != mPanelAdj.end())
+			{
+				Array<Ref<FixedConstraint>> cs = panelIt->second;
+				for (auto &cr : cs)
+				{
+					auto pit = mPanelIdx.find(cr.GetPtr());
+					if (pit != mPanelIdx.end())
+						UntrackConstraint(false, pit->second);
+				}
+			}
+			mBodyInterface->RemoveBody(id);
+			mBodyInterface->DestroyBody(id);
+			mFractureData.erase(id);
+			mChunkDamage.erase(id);
 		}
 	}
 
@@ -651,10 +941,10 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		}
 	}
 
-	// ---- Isolation check: free frame elements with exactly 1 connection ----
+	// ---- Isolation check: free frame elements where BOTH endpoints have exactly 1 connection ----
 	for (int i = 0; i < (int)mFrameConstraints.size(); )
 	{
-		FixedConstraint *c = mFrameConstraints[i].GetPtr();
+		SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
 		BodyID id1 = c->GetBody1()->GetID();
 		BodyID id2 = c->GetBody2()->GetID();
 		auto it1 = mFrameConnCount.find(id1);
@@ -663,45 +953,60 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			&& it1 != mFrameConnCount.end() && it1->second == 1;
 		bool b2_iso = mBodyInterface->GetMotionType(id2) == EMotionType::Dynamic
 			&& it2 != mFrameConnCount.end() && it2->second == 1;
-		if (b1_iso || b2_iso)
+		if (b1_iso && b2_iso)
 		{
 			mBodyInterface->ActivateBody(id1);
 			mBodyInterface->ActivateBody(id2);
+			if (mLogFile)
+			{
+				RVec3 p1 = mBodyInterface->GetCenterOfMassPosition(id1);
+				RVec3 p2 = mBodyInterface->GetCenterOfMassPosition(id2);
+				fprintf(mLogFile, "[ISOLATE] body1=(%.1f,%.1f,%.1f) cnt=%d  body2=(%.1f,%.1f,%.1f) cnt=%d\n",
+					(float)p1.GetX(),(float)p1.GetY(),(float)p1.GetZ(), it1->second,
+					(float)p2.GetX(),(float)p2.GetY(),(float)p2.GetZ(), it2->second);
+				fflush(mLogFile);
+			}
 			UntrackConstraint(true, i);
 		}
 		else ++i;
 	}
 
-	// ---- Deformation failure: break frame constraints bent beyond tolerance ----
+	// ---- Deformation failure: break frame joints that have leaned past the threshold angle ----
+	// The motor yield limit (sFrameBreakMoment, baked at creation) allows joints to physically
+	// deform under gravitational overload.  Angle accumulates over time; when it exceeds
+	// sFrameBendThreshold the joint breaks.  Tall buildings lean for many frames before the
+	// base breaks (topple); short buildings collapse quickly once they lose support.
 	{
-		static constexpr float cBendDeadband = 0.05f; // ~3° — ignore solver micro-drift
-		const float dt = inParams.mDeltaTime;
 		for (int i = (int)mFrameConstraints.size() - 1; i >= 0; --i)
 		{
-			FixedConstraint *c = mFrameConstraints[i].GetPtr();
+			SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
 			Body *b1 = c->GetBody1(), *b2 = c->GetBody2();
 			if (!b1->IsActive() && !b2->IsActive()) continue;
 
 			auto restIt = mConstraintRestRot.find(c);
 			if (restIt == mConstraintRestRot.end()) continue;
 
-			Quat currentRel = b1->GetRotation().Conjugated() * b2->GetRotation();
-			Quat delta      = restIt->second.Conjugated() * currentRel;
-			float bendAngle = 2.0f * acosf(JPH::Clamp(delta.GetW(), -1.0f, 1.0f));
-			float excess    = JPH::max(bendAngle - cBendDeadband, 0.0f);
+			Quat  currentRel = b1->GetRotation().Conjugated() * b2->GetRotation();
+			Quat  delta      = restIt->second.Conjugated() * currentRel;
+			float bendAngle  = 2.0f * acosf(JPH::Clamp(abs(delta.GetW()), 0.0f, 1.0f));
 
-			float &bdmg = mConstraintBendDmg[c];
-			bdmg += excess * dt;
-
-			if (bdmg > sFrameBendThreshold)
+			if (mLogFile && bendAngle > 0.02f)
 			{
-				// Phase 1: release rotation but keep position — lets the structure lean visibly.
-				PointConstraintSettings pcs;
-				pcs.mPoint1 = pcs.mPoint2 = (b1->GetCenterOfMassPosition() + b2->GetCenterOfMassPosition()) * Real(0.5f);
-				Ref<PointConstraint> pc = StaticCast<PointConstraint>(pcs.Create(*b1, *b2));
-				mPhysicsSystem->AddConstraint(pc);
-				mBendJoints.push_back({ pc, 0.6f });
+				RVec3 p = b1->GetCenterOfMassPosition();
+				fprintf(mLogFile, "[ANGLE] %.4f rad  pos=(%.1f,%.1f,%.1f)\n",
+					bendAngle, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
+				fflush(mLogFile);
+			}
 
+			if (bendAngle > sFrameBendThreshold)
+			{
+				if (mLogFile)
+				{
+					RVec3 p = b1->GetCenterOfMassPosition();
+					fprintf(mLogFile, "[BREAK] angle=%.3f rad  pos=(%.1f,%.1f,%.1f)\n",
+						bendAngle, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
+					fflush(mLogFile);
+				}
 				mBodyInterface->ActivateBody(b1->GetID());
 				mBodyInterface->ActivateBody(b2->GetID());
 				UntrackConstraint(true, i);
@@ -709,44 +1014,12 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		}
 	}
 
-	// ---- Structural integrity: BFS from ground, detach floating chunks ----
-	CheckStructuralIntegrity();
-
-	// ---- Gravitational moment: sever bridge constraints bent beyond their capacity ----
-	CheckGravitationalMoment();
-
-	// ---- Expire bend joints (point-only joints inserted during lean phase) ----
-	{
-		const float dt = inParams.mDeltaTime;
-		for (int i = (int)mBendJoints.size() - 1; i >= 0; --i)
-		{
-			mBendJoints[i].mLifetime -= dt;
-			if (mBendJoints[i].mLifetime <= 0.0f)
-			{
-				PointConstraint *pc = mBendJoints[i].mConstraint.GetPtr();
-				mBodyInterface->ActivateBody(pc->GetBody1()->GetID());
-				mBodyInterface->ActivateBody(pc->GetBody2()->GetID());
-				mPhysicsSystem->RemoveConstraint(pc);
-				mBendJoints.erase(mBendJoints.begin() + i);
-			}
-		}
-	}
-
 	// ---- Fracture bodies that have lost all their constraints ----
 	if (!mFractureData.empty())
 	{
-		// Bodies still in the lean phase should not fracture yet.
-		UnorderedSet<BodyID> inLeanPhase;
-		for (auto &bj : mBendJoints)
-		{
-			inLeanPhase.insert(bj.mConstraint->GetBody1()->GetID());
-			inLeanPhase.insert(bj.mConstraint->GetBody2()->GetID());
-		}
-
 		Array<BodyID> to_fracture;
 		for (auto &kv : mFractureData)
 		{
-			if (inLeanPhase.find(kv.first) != inLeanPhase.end()) continue;
 			const UnorderedMap<BodyID, int> &cnt = kv.second.mIsFrame ? mFrameConnCount : mPanelConnCount;
 			if (cnt.find(kv.first) == cnt.end())
 				to_fracture.push_back(kv.first);
@@ -756,6 +1029,15 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		for (BodyID id : to_fracture)
 		{
 			if (budget-- <= 0) break;
+			if (mLogFile)
+			{
+				RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
+				auto fit = mFractureData.find(id);
+				fprintf(mLogFile, "[NOCONN] zero-connection fracture type=%s at (%.1f,%.1f,%.1f)\n",
+					(fit != mFractureData.end() && fit->second.mIsFrame) ? "FRAME" : "PANEL",
+					(float)pos.GetX(),(float)pos.GetY(),(float)pos.GetZ());
+				fflush(mLogFile);
+			}
 			SpawnFracture(id);
 		}
 	}
@@ -787,14 +1069,20 @@ void DestructibleTest::CreateSettingsMenu(DebugUI *inUI, UIElement *inSubMenu)
 	inUI->CreateSlider(inSubMenu, "Frame Break Force (N\xc2\xb7s)", sFrameBreakForce, 100.0f, 2000.0f, 50.0f,
 		[](float inValue) { sFrameBreakForce = inValue; });
 
-	inUI->CreateSlider(inSubMenu, "Frame Break Moment (N\xc2\xb7m)", sFrameBreakMoment, 500.0f, 50000.0f, 500.0f,
+	inUI->CreateSlider(inSubMenu, "Motor Yield Torque (N\xc2\xb7m, restart)", sFrameBreakMoment, 500.0f, 50000.0f, 500.0f,
 		[](float inValue) { sFrameBreakMoment = inValue; });
 
-	inUI->CreateSlider(inSubMenu, "Frame Break Axial (N)", sFrameBreakAxial, 1000.0f, 100000.0f, 1000.0f,
+	inUI->CreateSlider(inSubMenu, "Joint Break Force (N)", sFrameBreakAxial, 100.0f, 20000.0f, 100.0f,
 		[](float inValue) { sFrameBreakAxial = inValue; });
 
-	inUI->CreateSlider(inSubMenu, "Frame Bend Threshold (rad\xc2\xb7s)", sFrameBendThreshold, 0.1f, 5.0f, 0.1f,
+	inUI->CreateSlider(inSubMenu, "Angle Safety Net (rad)", sFrameBendThreshold, 0.10f, 1.0f, 0.05f,
 		[](float inValue) { sFrameBendThreshold = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Frame Spring Stiffness (N\xc2\xb7m/rad)", sFrameSpringStiffness, 10000.0f, 2000000.0f, 10000.0f,
+		[](float inValue) { sFrameSpringStiffness = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Frame Spring Damping (N\xc2\xb7m\xc2\xb7s/rad)", sFrameSpringDamping, 1000.0f, 200000.0f, 1000.0f,
+		[](float inValue) { sFrameSpringDamping = inValue; });
 
 	inUI->CreateTextButton(inSubMenu, "Reset", [this]() { RestartTest(); });
 }

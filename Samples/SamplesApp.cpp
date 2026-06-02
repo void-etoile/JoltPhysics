@@ -2124,6 +2124,13 @@ void SamplesApp::UpdateDebug(float inDeltaTime)
 
 bool SamplesApp::UpdateFrame(float inDeltaTime)
 {
+	// Total frame time: true wall-clock duration of the previous full frame (physics + render + present).
+	// mLastFrameMs is set by Application::RenderFrame from clock_delta_time before calling UpdateFrame.
+	if (mTotalFrameMs == 0.0f)
+		mTotalFrameMs = mLastFrameMs;
+	else
+		mTotalFrameMs = mTotalFrameMs * 0.95f + mLastFrameMs * 0.05f;
+
 	// Reinitialize the job system if the concurrency setting changed
 	if (mMaxConcurrentJobs != mJobSystem->GetMaxConcurrency())
 		static_cast<JobSystemThreadPool *>(mJobSystem)->SetNumThreads(mMaxConcurrentJobs - 1);
@@ -2146,10 +2153,11 @@ bool SamplesApp::UpdateFrame(float inDeltaTime)
 	else
 		mStatusString = mTest->GetStatusString();
 
-	// Append physics step wall time (EMA, lags one frame — imperceptible)
+	// Append frame timing breakdown: total | render (= total − physics) | physics
 	if (!mStatusString.empty())
 		mStatusString += "\n";
-	mStatusString += StringFormat("Physics CPU: %.2f ms", (double)mPhysicsStepMs);
+	mStatusString += StringFormat("Total: %.2f ms | Physics: %.2f ms",
+		(double)mTotalFrameMs, (double)mPhysicsStepMs);
 
 	// Select the next test if automatic testing times out
 	if (!CheckNextTest())
@@ -2584,6 +2592,9 @@ void SamplesApp::StepPhysics(JobSystem *inJobSystem)
 {
 	float delta_time = 1.0f / mUpdateFrequency;
 
+	// Remember start time (includes PrePhysicsUpdate so it matches the profiler's StepPhysics scope)
+	chrono::high_resolution_clock::time_point clock_start = chrono::high_resolution_clock::now();
+
 	{
 		// Pre update
 		JPH_PROFILE("PrePhysicsUpdate");
@@ -2595,9 +2606,6 @@ void SamplesApp::StepPhysics(JobSystem *inJobSystem)
 	#endif // JPH_DEBUG_RENDERER
 		mTest->PrePhysicsUpdate(pre_update);
 	}
-
-	// Remember start time
-	chrono::high_resolution_clock::time_point clock_start = chrono::high_resolution_clock::now();
 
 	// Step the world (with fixed frequency)
 	mPhysicsSystem->Update(delta_time, mCollisionSteps, mTempAllocator, inJobSystem);

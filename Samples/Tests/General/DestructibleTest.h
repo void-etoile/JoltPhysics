@@ -6,7 +6,7 @@
 
 #include <Tests/Test.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
-#include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/SixDOFConstraint.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Body/BodyID.h>
@@ -74,12 +74,13 @@ private:
 	void					BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inFloorsPerSeg, float inHalfW, float inHalfD);
 	void					CheckStructuralIntegrity();
 	void					CheckGravitationalMoment();
+	void					CheckSupportStability();
 	void					SpawnFracture(BodyID inPanelID);
 
 	struct ProjectileRecord { BodyID mID; float mLifeRemaining; };
 
 	Array<Ref<FixedConstraint>>			mPanelConstraints;	// infill panels
-	Array<Ref<FixedConstraint>>			mFrameConstraints;	// structural frame
+	Array<Ref<SixDOFConstraint>>		mFrameConstraints;	// structural frame
 	UnorderedMap<BodyID, FractureInfo>	mFractureData;		// registered chunks → fracture geometry
 	Array<BodyID>						mShardBodies;		// live shard bodies, cleaned up when sleeping
 	Array<ProjectileRecord>				mProjectiles;		// live projectiles with remaining lifetime
@@ -87,18 +88,13 @@ private:
 	// Adjacency index: O(degree) constraint lookup and removal.
 	UnorderedMap<BodyID, int>							mFrameConnCount;
 	UnorderedMap<BodyID, int>							mPanelConnCount;
-	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>>	mFrameAdj;
+	UnorderedMap<BodyID, Array<Ref<SixDOFConstraint>>>	mFrameAdj;
 	UnorderedMap<BodyID, Array<Ref<FixedConstraint>>>	mPanelAdj;
-	UnorderedMap<FixedConstraint *, int>				mFrameIdx;
+	UnorderedMap<SixDOFConstraint *, int>				mFrameIdx;
 	UnorderedMap<FixedConstraint *, int>				mPanelIdx;
 
-	// Deformation failure: rest-pose relative rotation and accumulated bend damage per frame constraint.
-	UnorderedMap<FixedConstraint *, Quat>				mConstraintRestRot;
-	UnorderedMap<FixedConstraint *, float>				mConstraintBendDmg;
-
-	// Two-phase break: FixedConstraint fails → PointConstraint lets the structure lean → expires.
-	struct BendJoint { Ref<PointConstraint> mConstraint; float mLifetime; };
-	Array<BendJoint>									mBendJoints;
+	// Rest-pose relative rotation per frame constraint (for deformation angle measurement).
+	UnorderedMap<SixDOFConstraint *, Quat>				mConstraintRestRot;
 
 	// Per-chunk accumulated damage (N·s). Filled from mPendingDamage each frame.
 	UnorderedMap<BodyID, float>							mChunkDamage;
@@ -108,7 +104,7 @@ private:
 	std::mutex										mDamageMutex;
 	Array<std::pair<BodyID, float>>					mPendingDamage;
 
-	// Create a FixedConstraint between inA and inB, register it everywhere.
+	// Create a frame (SixDOFConstraint) or panel (FixedConstraint) between inA and inB, register everywhere.
 	void					TrackConstraint(bool inIsFrame, Body *inA, Body *inB);
 
 	// Swap-and-pop removal of the constraint at inPos; updates all indices.
@@ -126,7 +122,9 @@ private:
 
 	static float			sPanelBreakForce;
 	static float			sFrameBreakForce;
-	static float			sFrameBreakMoment;    // gravitational bending moment threshold (N·m)
-	static float			sFrameBreakAxial;     // gravitational axial force threshold (N) for bridge constraints
-	static float			sFrameBendThreshold;  // accumulated radian-seconds of bend before a constraint snaps
+	static float			sFrameBreakMoment;      // gravitational bending moment threshold (N·m)
+	static float			sFrameBreakAxial;       // gravitational axial force threshold (N) for bridge constraints
+	static float			sFrameBendThreshold;    // max deformation angle (rad) before a frame constraint breaks
+	static float			sFrameSpringStiffness;  // N·m/rad — rotational stiffness of frame joints
+	static float			sFrameSpringDamping;    // N·m·s/rad — rotational damping of frame joints
 };

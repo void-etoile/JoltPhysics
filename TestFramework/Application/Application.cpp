@@ -228,6 +228,7 @@ bool Application::RenderFrame()
 	std::chrono::microseconds delta = std::chrono::duration_cast<std::chrono::microseconds>(time - mLastUpdateTime);
 	mLastUpdateTime = time;
 	float clock_delta_time = 1.0e-6f * delta.count();
+	mLastFrameMs = clock_delta_time * 1.0e3f;
 	float world_delta_time = 0.0f;
 	if (mRequestedDeltaTime <= 0.0f)
 	{

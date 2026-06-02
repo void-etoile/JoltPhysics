@@ -30,6 +30,10 @@ protected:
 	/// Debug renderer module
 	DebugRenderer *				mDebugRenderer;
 
+	/// True wall-clock time for the previous full frame (physics + render + present), in milliseconds.
+	/// Set from clock_delta_time at the top of RenderFrame; available inside UpdateFrame.
+	float						mLastFrameMs = 0.0f;
+
 	/// Main window
 	ApplicationWindow *			mWindow;
 

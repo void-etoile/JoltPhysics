@@ -246,4 +246,5 @@ private:
 	uint					mStepNumber = 0;											// Which step number we're accumulating
 	chrono::microseconds	mTotalTime { 0 };											// How many nano seconds we spent simulating
 	float					mPhysicsStepMs = 0.0f;										// Exponential moving average of PhysicsSystem::Update() wall time (ms)
+	float					mTotalFrameMs = 0.0f;										// Exponential moving average of total frame wall time (ms)
 };
