@@ -66,6 +66,8 @@ private:
 		Array<Vec3>				mLocalCenters;	// centroid of each cell in panel local space
 		bool					mIsFrame = false; // true → break when frame constraints gone; false → panel constraints
 		bool					mIsFloor = false; // true → use sFloorBreakForce instead of sPanelBreakForce
+		int mInitialConnCount = 0;      // panel connections at construction time (floors only)
+		int mInitialFrameConnCount = 0; // frame connections at construction time (beams only)
 	};
 
 	void					FireProjectile(RVec3Arg inPos, Vec3Arg inDirection);
@@ -74,9 +76,10 @@ private:
 	void					BuildApartment(RVec3Arg inCenter, int inNumFloors, float inHalfW, float inHalfD);
 	void					BuildTower(RVec3Arg inCenter, int inNumFloors, float inRadius, int inNumSides);
 	void					BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inFloorsPerSeg, float inHalfW, float inHalfD);
-	void					CheckStructuralIntegrity();
-	void					CheckGravitationalMoment();
-	void					CheckSupportStability();
+	void					BuildEiffelTower(RVec3Arg inCenter);
+	void					CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope);
+	void					CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope);
+	void					CheckSupportStability(const UnorderedSet<BodyID> &inScope);
 	void					SpawnFracture(BodyID inPanelID);
 
 	struct ProjectileRecord { BodyID mID; float mLifeRemaining; };
@@ -111,11 +114,22 @@ private:
 	// Written only on the main thread (FireProjectile / expire loop); safe to read from physics thread.
 	UnorderedSet<BodyID>							mProjectileSet;
 
-	// Create a frame (SixDOFConstraint) or panel (FixedConstraint) between inA and inB, register everywhere.
+	// Bodies whose frame constraints were broken since the last cascade run.
+	// Cleared just before the structural cascade so the cascade's own breaks feed into the next frame.
+	UnorderedSet<BodyID> mRecentlyBrokenFrameBodies;
+
+	// Create a frame (SixDOFConstraint with spring motors) or panel (FixedConstraint) between inA and inB.
 	void					TrackConstraint(bool inIsFrame, Body *inA, Body *inB);
 
+	UnorderedMap<BodyID, Array<int>> BuildFrameAdjacency() const;
+
+	// Expand inSeeds to all bodies in the same frame-constraint components, writing results into outScope.
+	void ExpandToComponents(const UnorderedSet<BodyID> &inSeeds, const UnorderedMap<BodyID, Array<int>> &inAdj, UnorderedSet<BodyID> &outScope) const;
+
 	// Swap-and-pop removal of the constraint at inPos; updates all indices.
-	void					UntrackConstraint(bool inIsFrame, int inPos);
+	// Pass inSpikeDamage=false when releasing a floating section rather than reacting to destruction,
+	// to suppress spikeBeamDamage / spikeFloorDamage cascades on surviving neighbours.
+	void					UntrackConstraint(bool inIsFrame, int inPos, bool inSpikeDamage = true);
 
 	uint32					mNextBuildingGroupID = 1;	// unique per-building so inter-building collision passes GroupFilterTable
 	int						mInitialPanelCount = 0;
@@ -135,5 +149,5 @@ private:
 	static float			sFrameBendThreshold;    // max deformation angle (rad) before a frame constraint breaks
 	static float			sFrameSpringStiffness;  // N·m/rad — rotational stiffness of frame joints
 	static float			sFrameSpringDamping;    // N·m·s/rad — rotational damping of frame joints
-	static float			sFrameSwayBreakRate;    // rad/s — relative angular velocity at which a joint snaps (prevents whip oscillation)
+	static float			sFrameSwayBreakRate;    // rad/s — relative angular velocity at which a joint snaps
 };
