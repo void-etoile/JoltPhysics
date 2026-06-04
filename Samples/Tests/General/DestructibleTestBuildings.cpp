@@ -662,6 +662,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 		mFractureData[flr->GetID()].mIsFloor = true;
 		panelC(bf, flr); panelC(bb, flr);
 		panelC(bl, flr); panelC(br, flr);
+
 	}
 
 	float roof_y = aStubH + inNumFloors * aFloorH;
@@ -1010,4 +1011,172 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 	}
 	for (int k = 0; k < inNumSides; ++k)
 		frameC(cols[k][inNumFloors - 1], roof);
+}
+
+// ---------------------------------------------------------------------------
+// BuildEiffelTower
+// ---------------------------------------------------------------------------
+
+void DestructibleTest::BuildEiffelTower(RVec3Arg inCenter)
+{
+	constexpr int   NumLevels  = 12;
+	constexpr float BaseWidth  = 120.0f; // full square side at ground
+	constexpr float TopWidth   = 8.0f;   // full square side at top of taper
+	constexpr float Height     = 300.0f; // height of the tapered body
+	constexpr float BeamThick  = 2.0f;   // main leg cross-section
+	constexpr float BraceThick = 1.2f;   // cross-brace / ring cross-section
+	constexpr float cBase      = 0.5f;   // vertical offset so all bodies clear y=0
+
+	// Corner signs and adjacent face pairs, matching the four sides of the square.
+	constexpr float kSX[4] = { +1, +1, -1, -1 };
+	constexpr float kSZ[4] = { +1, -1, +1, -1 };
+	constexpr int kFaces[4][2] = { {0,1}, {2,3}, {0,2}, {1,3} };
+
+	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
+
+	auto addBody = [&](RVec3Arg lPos, QuatArg rot, RefConst<Shape> sh,
+	                   EMotionType mt, ObjectLayer ol, float mass) -> Body *
+	{
+		BodyCreationSettings bcs(sh, inCenter + lPos, rot, mt, ol);
+		if (mt != EMotionType::Static)
+		{
+			bcs.mOverrideMassProperties       = EOverrideMassProperties::CalculateInertia;
+			bcs.mMassPropertiesOverride.mMass = mass;
+		}
+		Body *b = mBodyInterface->CreateBody(bcs);
+		b->SetCollisionGroup(CollisionGroup(filter, gid, 0));
+		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
+		return b;
+	};
+
+	auto frameC = [&](Body *a, Body *b) { TrackConstraint(true, a, b); };
+
+	// Register a beam in mFractureData using its body-local half-extents.
+	auto regBeam = [&](Body *b, Vec3 lCenter, Vec3 he)
+	{
+		RVec3 wp = inCenter + RVec3(lCenter);
+		uint32 seed = uint32(int(float(wp.GetX()) * 100.0f) * 73856093u
+			^ int(float(wp.GetY()) * 100.0f) * 19349663u
+			^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
+		FractureInfo info;
+		info.mIsFrame = true;
+		sGenerateFractureShapes(he, seed, 3, info.mShapes, info.mLocalCenters);
+		mFractureData[b->GetID()] = info;
+	};
+
+	// Create a dynamic BoxShape beam between two body-local points.
+	auto addBeam = [&](Vec3 A, Vec3 B, float thick, float mass) -> Body *
+	{
+		Vec3 delta = B - A;
+		float len = delta.Length();
+		if (len < 1.0e-4f) return nullptr;
+		Vec3 center = (A + B) * 0.5f;
+		Quat rot = Quat::sFromTo(Vec3::sAxisY(), delta / len);
+		Vec3 he(thick * 0.5f, len * 0.5f, thick * 0.5f);
+		Body *b = addBody(RVec3(center), rot, new BoxShape(he),
+		                  EMotionType::Dynamic, Layers::MOVING, mass);
+		regBeam(b, center, he);
+		return b;
+	};
+
+	// Static anchor stubs at the four base corners.
+	const float h_base = BaseWidth * 0.5f;
+	Body *stubs[4];
+	for (int i = 0; i < 4; ++i)
+	{
+		Vec3 lPos(kSX[i] * h_base, cBase, kSZ[i] * h_base);
+		stubs[i] = addBody(RVec3(lPos), Quat::sIdentity(),
+		    new BoxShape(Vec3(0.5f, 0.5f, 0.5f)),
+		    EMotionType::Static, Layers::NON_MOVING, 0.0f);
+	}
+
+	// legBeams[corner][level] — one angled body per corner per level.
+	Body *legBeams[4][NumLevels];
+	for (int i = 0; i < 4; ++i)
+		for (int s = 0; s < NumLevels; ++s)
+			legBeams[i][s] = nullptr;
+
+	for (int level = 0; level < NumLevels; ++level)
+	{
+		float t0 = float(level)     / float(NumLevels);
+		float t1 = float(level + 1) / float(NumLevels);
+		// √t profile: width drops rapidly near base, slowly near top.
+		float w0 = BaseWidth + (TopWidth - BaseWidth) * sqrtf(t0);
+		float w1 = BaseWidth + (TopWidth - BaseWidth) * sqrtf(t1);
+		float h0 = w0 * 0.5f, h1 = w1 * 0.5f;
+		float y0 = cBase + t0 * Height;
+		float y1 = cBase + t1 * Height;
+
+		// Corner leg beams (4 angled structural columns per level)
+		for (int i = 0; i < 4; ++i)
+		{
+			Vec3 A(kSX[i]*h0, y0, kSZ[i]*h0);
+			Vec3 B(kSX[i]*h1, y1, kSZ[i]*h1);
+			legBeams[i][level] = addBeam(A, B, BeamThick, 300.0f);
+		}
+
+		// Horizontal ring at the base of this level (4 side members)
+		for (const auto &f : kFaces)
+		{
+			int a = f[0], b = f[1];
+			Body *ring = addBeam(
+			    Vec3(kSX[a]*h0, y0, kSZ[a]*h0),
+			    Vec3(kSX[b]*h0, y0, kSZ[b]*h0),
+			    BraceThick, 60.0f);
+			frameC(legBeams[a][level], ring);
+			frameC(legBeams[b][level], ring);
+		}
+
+		// X-braces: two crossing diagonals per face (4 faces × 2 = 8 per level)
+		for (const auto &f : kFaces)
+		{
+			int a = f[0], b = f[1];
+			Body *br1 = addBeam(
+			    Vec3(kSX[a]*h0, y0, kSZ[a]*h0),
+			    Vec3(kSX[b]*h1, y1, kSZ[b]*h1),
+			    BraceThick, 60.0f);
+			frameC(legBeams[a][level], br1);
+			frameC(legBeams[b][level], br1);
+
+			Body *br2 = addBeam(
+			    Vec3(kSX[b]*h0, y0, kSZ[b]*h0),
+			    Vec3(kSX[a]*h1, y1, kSZ[a]*h1),
+			    BraceThick, 60.0f);
+			frameC(legBeams[b][level], br2);
+			frameC(legBeams[a][level], br2);
+		}
+	}
+
+	// Vertical chains: stub → leg[0] → leg[1] → … → leg[NumLevels-1]
+	for (int i = 0; i < 4; ++i)
+	{
+		frameC(stubs[i], legBeams[i][0]);
+		for (int s = 0; s + 1 < NumLevels; ++s)
+			frameC(legBeams[i][s], legBeams[i][s + 1]);
+	}
+
+	// Closing ring at the very top
+	{
+		float ht = TopWidth * 0.5f;
+		float yt = cBase + Height;
+		for (const auto &f : kFaces)
+		{
+			int a = f[0], b = f[1];
+			Body *ring = addBeam(
+			    Vec3(kSX[a]*ht, yt, kSZ[a]*ht),
+			    Vec3(kSX[b]*ht, yt, kSZ[b]*ht),
+			    BraceThick, 60.0f);
+			frameC(legBeams[a][NumLevels - 1], ring);
+			frameC(legBeams[b][NumLevels - 1], ring);
+		}
+	}
+
+	// Antenna
+	{
+		float yt = cBase + Height;
+		Body *ant = addBeam(Vec3(0, yt, 0), Vec3(0, yt + 35.0f, 0), BraceThick, 20.0f);
+		for (int i = 0; i < 4; ++i)
+			frameC(legBeams[i][NumLevels - 1], ant);
+	}
 }
