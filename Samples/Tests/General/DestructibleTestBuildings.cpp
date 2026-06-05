@@ -215,6 +215,7 @@ void DestructibleTest::BuildMainWall()
 
 	Ref<GroupFilterTable> building_filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	float col_x[cNumBays + 1];
 	for (int j = 0; j <= cNumBays; ++j)
@@ -374,6 +375,7 @@ void DestructibleTest::BuildHouse(RVec3Arg inCenter)
 
 	Ref<GroupFilterTable> house_filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	auto addBody = [&](RVec3Arg inLocalPos, QuatArg inRot, RefConst<Shape> inShape,
 		EMotionType inMotion, ObjectLayer inLayer, float inMass, EActivation) -> Body *
@@ -561,6 +563,7 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 
 	Ref<GroupFilterTable> apt_filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	auto addBody = [&](RVec3Arg lPos, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{
@@ -700,6 +703,7 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	auto addBody = [&](RVec3Arg lPos, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{
@@ -876,6 +880,7 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	auto addBody = [&](RVec3Arg lPos, QuatArg rot, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{
@@ -1034,6 +1039,7 @@ void DestructibleTest::BuildEiffelTower(RVec3Arg inCenter)
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	auto addBody = [&](RVec3Arg lPos, QuatArg rot, RefConst<Shape> sh,
 	                   EMotionType mt, ObjectLayer ol, float mass) -> Body *
@@ -1203,6 +1209,7 @@ void DestructibleTest::BuildCastle(RVec3Arg inCenter, float inHalfSize)
 
 	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
 	uint32 gid = mNextBuildingGroupID++;
+	mCurrentBuildingGroup = gid;	// stable structural id for building-scoped destruction passes
 
 	auto addBody = [&](RVec3Arg lPos, QuatArg rot, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
 	{

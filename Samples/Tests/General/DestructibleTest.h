@@ -76,9 +76,11 @@ private:
 	void					BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inFloorsPerSeg, float inHalfW, float inHalfD);
 	void					BuildEiffelTower(RVec3Arg inCenter);
 	void					BuildCastle(RVec3Arg inCenter, float inHalfSize);
-	void					CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope);
-	void					CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope);
-	void					CheckSupportStability(const UnorderedSet<BodyID> &inScope);
+	// inAdj is a frame-graph adjacency snapshot built by the caller and shared across these passes
+	// (rebuilt only when a pass actually breaks a joint), avoiding a whole-scene rebuild in each.
+	void					CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope, const UnorderedMap<BodyID, Array<int>> &inAdj);
+	void					CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope, const UnorderedMap<BodyID, Array<int>> &inAdj);
+	void					CheckSupportStability(const UnorderedSet<BodyID> &inScope, const UnorderedMap<BodyID, Array<int>> &inAdj);
 	void					SpawnFracture(BodyID inPanelID);
 
 	struct ProjectileRecord { BodyID mID; float mLifeRemaining; };
@@ -126,6 +128,26 @@ private:
 	// zero-connection. Lets the zero-connection fracture pass check only these instead of
 	// scanning the whole scene every frame. Over-budget entries persist for the next frame.
 	UnorderedSet<BodyID> mConnDirty;
+
+	// Building-scoped frame-joint index for the deformation / isolation passes. Each frame
+	// constraint is tagged with a STABLE structural building id (the gid its Build* assigned at
+	// construction — never changed by the collision-group regrouping, which allocates fresh gids).
+	// Once a building loses a joint it is added to mDamagedBuildings, and those passes then iterate
+	// only the joints of damaged buildings instead of the whole scene — so an intact, sleeping
+	// building costs nothing, which cuts the per-frame peak rather than just the average.
+	uint32												mCurrentBuildingGroup = 0;	// set by each Build* before tracking
+	UnorderedMap<uint32, Array<Ref<SixDOFConstraint>>>	mBuildingFrameConstraints;	// stable building id → its frame joints
+	UnorderedMap<SixDOFConstraint *, uint32>			mFrameConstraintBuilding;	// frame joint → its stable building id
+	UnorderedSet<uint32>								mDamagedBuildings;			// buildings that have lost ≥1 joint
+
+	// Frame-graph snapshot (adjacency + ground-reachable set) persisted ACROSS frames and rebuilt
+	// only when the frame-constraint count changes (i.e. only on frames where a joint broke). The
+	// graph is otherwise static, so on the common "leaning under load" frame this is reused for
+	// free, removing the per-frame O(all-joints) adjacency build + grounded BFS from the hot path.
+	UnorderedMap<BodyID, Array<int>>					mSnapFrameAdj;
+	UnorderedSet<BodyID>								mSnapGrounded;
+	int													mSnapCount = -1;	// constraint count when the snapshot was built; -1 = invalid
+	void					EnsureFrameSnapshot();
 
 	// Create a frame (SixDOFConstraint with spring motors) or panel (FixedConstraint) between inA and inB.
 	void					TrackConstraint(bool inIsFrame, Body *inA, Body *inB);

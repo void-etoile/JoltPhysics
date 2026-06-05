@@ -81,6 +81,10 @@ void DestructibleTest::TrackConstraint(bool inIsFrame, Body *inA, Body *inB)
 		mFrameAdj[id1].push_back(c);
 		mFrameAdj[id2].push_back(c);
 		mConstraintRestRot[c.GetPtr()] = rotA.Conjugated() * rotB;
+
+		// Tag with the stable structural building id for the building-scoped deformation/isolation passes.
+		mBuildingFrameConstraints[mCurrentBuildingGroup].push_back(c);
+		mFrameConstraintBuilding[c.GetPtr()] = mCurrentBuildingGroup;
 	}
 	else
 	{
@@ -135,6 +139,31 @@ void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
 		};
 		removeAdj(id1);
 		removeAdj(id2);
+
+		// Building index: mark this building damaged and remove the joint from its list.
+		{
+			auto bit = mFrameConstraintBuilding.find(c);
+			if (bit != mFrameConstraintBuilding.end())
+			{
+				uint32 building = bit->second;
+				mDamagedBuildings.insert(building);
+				auto lit = mBuildingFrameConstraints.find(building);
+				if (lit != mBuildingFrameConstraints.end())
+				{
+					Array<Ref<SixDOFConstraint>> &list = lit->second;
+					for (int j = 0; j < (int)list.size(); ++j)
+						if (list[j].GetPtr() == c)
+						{
+							if (j + 1 < (int)list.size())
+								list[j] = std::move(list.back());
+							list.pop_back();
+							break;
+						}
+					if (list.empty()) mBuildingFrameConstraints.erase(lit);
+				}
+				mFrameConstraintBuilding.erase(bit);
+			}
+		}
 
 		mFrameIdx.erase(c);
 		mPhysicsSystem->RemoveConstraint(c);
@@ -243,6 +272,13 @@ void DestructibleTest::Initialize()
 	mJointYieldTime.clear();
 	mRecentlyBrokenFrameBodies.clear();
 	mConnDirty.clear();
+	mBuildingFrameConstraints.clear();
+	mFrameConstraintBuilding.clear();
+	mDamagedBuildings.clear();
+	mCurrentBuildingGroup = 0;
+	mSnapFrameAdj.clear();
+	mSnapGrounded.clear();
+	mSnapCount = -1;
 	mNextBuildingGroupID = 1;
 	{
 		std::lock_guard<std::mutex> lock(mDamageMutex);
@@ -583,11 +619,23 @@ void DestructibleTest::ComputeGroundedSet(const UnorderedMap<BodyID, Array<int>>
 	}
 }
 
+void DestructibleTest::EnsureFrameSnapshot()
+{
+	// The frame graph only changes when a constraint is removed (count decreases), so the snapshot
+	// stays valid — across frames — as long as the count is unchanged. Rebuild only when it isn't.
+	if (mSnapCount == (int)mFrameConstraints.size())
+		return;
+	mSnapFrameAdj = BuildFrameAdjacency();
+	mSnapGrounded.clear();
+	ComputeGroundedSet(mSnapFrameAdj, mSnapGrounded);
+	mSnapCount = (int)mFrameConstraints.size();
+}
+
 // ---------------------------------------------------------------------------
 // CheckStructuralIntegrity — BFS from ground; detach unsupported chunks
 // ---------------------------------------------------------------------------
 
-void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope)
+void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope, const UnorderedMap<BodyID, Array<int>> &inAdj)
 {
 	JPH_PROFILE("Destruct:StructuralIntegrity");
 	if (mFrameConstraints.empty())
@@ -595,15 +643,18 @@ void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inSc
 
 	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
 
-	auto adj = BuildFrameAdjacency();
+	const UnorderedMap<BodyID, Array<int>> &adj = inAdj;
 
+	// Reachability is computed WITHIN the scope component only: seed from the scope's static
+	// stubs and BFS through the frame graph (which can't leave the connected component), so this
+	// is O(scope) rather than a whole-scene reachability pass.
 	UnorderedSet<BodyID> reachable;
 	Array<BodyID> queue;
 
-	for (auto &kv : adj)
-		if (binl.GetMotionType(kv.first) == EMotionType::Static)
-			if (reachable.insert(kv.first).second)
-				queue.push_back(kv.first);
+	for (BodyID id : inScope)
+		if (binl.GetMotionType(id) == EMotionType::Static)
+			if (reachable.insert(id).second)
+				queue.push_back(id);
 
 	for (int qi = 0; qi < (int)queue.size(); ++qi)
 	{
@@ -620,23 +671,35 @@ void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inSc
 	}
 
 	UnorderedSet<BodyID> unsupported;
-	for (auto &kv : adj)
-		if (reachable.find(kv.first) == reachable.end() && inScope.find(kv.first) != inScope.end())
-			unsupported.insert(kv.first);
+	for (BodyID id : inScope)
+		if (reachable.find(id) == reachable.end())
+			unsupported.insert(id);
 
 	if (unsupported.empty())
 		return;
 
-	// Only sever BOUNDARY frame connections (one endpoint supported, one not).
-	for (int i = 0; i < (int)mFrameConstraints.size(); )
+	// Sever only BOUNDARY frame connections (one endpoint supported, one not). Gather candidate
+	// joints from the unsupported bodies' adjacency rather than scanning every joint in the scene.
+	UnorderedSet<SixDOFConstraint *> seenJoints;
+	Array<SixDOFConstraint *>        boundary;
+	for (BodyID id : unsupported)
 	{
-		SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
-		bool b1 = unsupported.find(c->GetBody1()->GetID()) != unsupported.end();
-		bool b2 = unsupported.find(c->GetBody2()->GetID()) != unsupported.end();
-		if (b1 != b2)
-			UntrackConstraint(true, i);
-		else
-			++i;
+		auto it = adj.find(id);
+		if (it == adj.end()) continue;
+		for (int ci : it->second)
+		{
+			SixDOFConstraint *c = mFrameConstraints[ci];
+			bool b1 = unsupported.find(c->GetBody1()->GetID()) != unsupported.end();
+			bool b2 = unsupported.find(c->GetBody2()->GetID()) != unsupported.end();
+			if (b1 != b2 && seenJoints.insert(c).second)
+				boundary.push_back(c);
+		}
+	}
+	for (SixDOFConstraint *c : boundary)
+	{
+		auto pit = mFrameIdx.find(c);
+		if (pit != mFrameIdx.end())
+			UntrackConstraint(true, pit->second);
 	}
 
 	// Panel constraints are left intact — panels fall with their frame section and detach
@@ -655,7 +718,7 @@ void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inSc
 // immune to solver-impulse spikes from projectile impacts.
 // ---------------------------------------------------------------------------
 
-void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope)
+void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope, const UnorderedMap<BodyID, Array<int>> &inAdj)
 {
 	JPH_PROFILE("Destruct:GravitationalMoment");
 	if (mFrameConstraints.empty())
@@ -665,7 +728,7 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 
 	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
 
-	auto adj = BuildFrameAdjacency();
+	const UnorderedMap<BodyID, Array<int>> &adj = inAdj;
 
 	const BodyLockInterfaceNoLock &bli = mPhysicsSystem->GetBodyLockInterfaceNoLock();
 
@@ -683,12 +746,11 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 	struct StackFrame { BodyID node; int parentEdge; int adjIdx; };
 	Array<StackFrame> stack;
 
-	for (auto &startKV : adj)
+	// Seed only from scope statics; the DFS then stays within the (connected) scope component.
+	for (BodyID seed : inScope)
 	{
-		BodyID seed = startKV.first;
 		if (disc.find(seed) != disc.end()) continue;
 		if (binl.GetMotionType(seed) != EMotionType::Static) continue;
-		if (inScope.find(seed) == inScope.end()) continue;
 
 		disc[seed] = low[seed] = timer++;
 		stMass[seed] = 0.0f;
@@ -795,7 +857,7 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 // check misses them because two support paths still exist.
 // ---------------------------------------------------------------------------
 
-void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope)
+void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope, const UnorderedMap<BodyID, Array<int>> &inAdj)
 {
 	JPH_PROFILE("Destruct:SupportStability");
 	if (mFractureData.empty() || mFrameConstraints.empty())
@@ -803,7 +865,7 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 
 	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
 
-	auto adj = BuildFrameAdjacency();
+	const UnorderedMap<BodyID, Array<int>> &adj = inAdj;
 
 	// BFS: find connected components; compute XZ bbox of static stubs per component.
 	struct CompInfo { float minX, maxX, minZ, maxZ; bool hasStub; };
@@ -811,9 +873,10 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 	Array<CompInfo>           comps;
 	bodyToComp.reserve((uint32)adj.size());
 
-	for (auto &kv : adj)
+	// Build components only within the scope (seeds restricted to scope bodies; the BFS stays in
+	// the connected component) instead of partitioning the whole scene.
+	for (BodyID seed : inScope)
 	{
-		BodyID seed = kv.first;
 		if (bodyToComp.find(seed) != bodyToComp.end()) continue;
 
 		int compIdx = (int)comps.size();
@@ -861,12 +924,10 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 	static constexpr int   cMaxFracturesPerFrame = 4;
 
 	Array<BodyID> toFracture;
-	for (auto &kv : mFractureData)
+	for (BodyID id : inScope)
 	{
-		if (!kv.second.mIsFrame) continue;
-		BodyID id = kv.first;
-
-		if (inScope.find(id) == inScope.end()) continue;
+		auto fdIt = mFractureData.find(id);
+		if (fdIt == mFractureData.end() || !fdIt->second.mIsFrame) continue;
 
 		auto compIt = bodyToComp.find(id);
 		if (compIt == bodyToComp.end()) continue;
@@ -1089,13 +1150,22 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	}
 
 	// ---- Isolation check: free frame elements where BOTH endpoints have exactly 1 connection ----
-	// A dangling pair can only arise after a frame joint has broken, so this is gated on anyDamage.
-	if (anyDamage)
+	// A dangling pair can only arise within a building that has broken a joint, so building-scoped.
+	if (!mDamagedBuildings.empty())
 	{
 		JPH_PROFILE("Destruct:Isolation");
-		for (int i = 0; i < (int)mFrameConstraints.size(); )
+		Array<SixDOFConstraint *> candidates;
+		for (uint32 building : mDamagedBuildings)
 		{
-			SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
+			auto lit = mBuildingFrameConstraints.find(building);
+			if (lit == mBuildingFrameConstraints.end()) continue;
+			for (Ref<SixDOFConstraint> &cr : lit->second)
+				candidates.push_back(cr.GetPtr());
+		}
+		for (SixDOFConstraint *c : candidates)
+		{
+			auto idxIt = mFrameIdx.find(c);
+			if (idxIt == mFrameIdx.end()) continue; // already broken earlier this frame
 			BodyID id1 = c->GetBody1()->GetID();
 			BodyID id2 = c->GetBody2()->GetID();
 			auto it1 = mFrameConnCount.find(id1);
@@ -1108,43 +1178,42 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			{
 				mBodyInterface->ActivateBody(id1);
 				mBodyInterface->ActivateBody(id2);
-				UntrackConstraint(true, i);
+				UntrackConstraint(true, idxIt->second);
 			}
-			else ++i;
 		}
 	}
 
-	// Shared frame-graph snapshot (adjacency + ground-reachable set) reused by the deformation
-	// and unground passes — both need exactly this. Built on first use and reused unless a frame
-	// joint breaks in between (tracked by the constraint count, which only ever decreases here).
-	UnorderedMap<BodyID, Array<int>> sharedFrameAdj;
-	UnorderedSet<BodyID>             sharedGrounded;
-	int snapshotFrameCount = -1;
-	auto ensureFrameSnapshot = [&]()
-	{
-		if (snapshotFrameCount == (int)mFrameConstraints.size())
-			return; // still valid — no frame joint broke since it was built
-		sharedFrameAdj = BuildFrameAdjacency();
-		sharedGrounded.clear();
-		ComputeGroundedSet(sharedFrameAdj, sharedGrounded);
-		snapshotFrameCount = (int)mFrameConstraints.size();
-	};
+	// Spike diagnostic: timestamps around the suspect passes; printed only on frames where our
+	// work exceeds a threshold, so a 4 ms spike self-reports its breakdown. (Temporary.)
+	auto tDeformStart = std::chrono::high_resolution_clock::now();
 
 	// ---- Deformation failure: break frame joints that have bent past the threshold ----
-	// Only check joints where at least one endpoint is still grounded (connected to a static stub).
-	// Joints between two freely-falling bodies carry no real structural load — any apparent
-	// deformation is solver noise that amplifies toward the top of a falling chain.
-	if (anyDamage)
+	// Building-scoped: only damaged buildings can have bending joints, so iterate just their joint
+	// lists rather than the whole scene — intact, sleeping buildings cost nothing.
+	// Only check joints where at least one endpoint is still grounded; joints between two
+	// freely-falling bodies carry no real load (apparent deformation there is solver noise).
+	if (!mDamagedBuildings.empty())
 	{
 		JPH_PROFILE("Destruct:Deformation");
-		ensureFrameSnapshot();
-		const UnorderedSet<BodyID> &deformGrounded = sharedGrounded;
+		EnsureFrameSnapshot();
+		const UnorderedSet<BodyID> &deformGrounded = mSnapGrounded;
 
-		for (int i = (int)mFrameConstraints.size() - 1; i >= 0; --i)
+		// Snapshot the candidate joints first: UntrackConstraint mutates mBuildingFrameConstraints.
+		Array<SixDOFConstraint *> candidates;
+		for (uint32 building : mDamagedBuildings)
 		{
-			SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
+			auto lit = mBuildingFrameConstraints.find(building);
+			if (lit == mBuildingFrameConstraints.end()) continue;
+			for (Ref<SixDOFConstraint> &cr : lit->second)
+				candidates.push_back(cr.GetPtr());
+		}
+
+		for (SixDOFConstraint *c : candidates)
+		{
+			auto idxIt = mFrameIdx.find(c);
+			if (idxIt == mFrameIdx.end()) continue; // already broken earlier this frame
+
 			Body *b1 = c->GetBody1(), *b2 = c->GetBody2();
-			// Cheap lock-free flag read; skips the bulk of sleeping joints in untouched buildings.
 			if (!b1->IsActive() && !b2->IsActive()) continue;
 
 			// Skip joints where neither side is grounded — they are in freefall together.
@@ -1177,10 +1246,12 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			{
 				mBodyInterface->ActivateBody(b1->GetID());
 				mBodyInterface->ActivateBody(b2->GetID());
-				UntrackConstraint(true, i);
+				UntrackConstraint(true, idxIt->second);
 			}
 		}
 	}
+
+	auto tCascadeStart = std::chrono::high_resolution_clock::now();
 
 	// ---- Structural cascade: break bridge joints then propagate disconnection ----
 	// Scoped to only the connected components containing recently broken frame joints,
@@ -1190,19 +1261,28 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	if (!mRecentlyBrokenFrameBodies.empty())
 	{
 		JPH_PROFILE("Destruct:CascadeScope");
-		auto cascAdj = BuildFrameAdjacency();
-		ExpandToComponents(mRecentlyBrokenFrameBodies, cascAdj, cascadeScope);
+		EnsureFrameSnapshot();
+		ExpandToComponents(mRecentlyBrokenFrameBodies, mSnapFrameAdj, cascadeScope);
 		mRecentlyBrokenFrameBodies.clear(); // cascade's own breaks feed next frame
 	}
 	if (!cascadeScope.empty())
 	{
-		CheckGravitationalMoment(cascadeScope);
-		CheckStructuralIntegrity(cascadeScope);
+		// Each check shares the frame-graph snapshot; ensureFrameSnapshot() rebuilds it between
+		// them only if the previous check actually broke a joint (changing the constraint count).
+		EnsureFrameSnapshot();
+		CheckGravitationalMoment(cascadeScope, mSnapFrameAdj);
+		EnsureFrameSnapshot();
+		CheckStructuralIntegrity(cascadeScope, mSnapFrameAdj);
 	}
 
 	// ---- XZ-overhang check: fracture frame elements that have swung outside their support footprint ----
 	if (!cascadeScope.empty())
-		CheckSupportStability(cascadeScope);
+	{
+		EnsureFrameSnapshot();
+		CheckSupportStability(cascadeScope, mSnapFrameAdj);
+	}
+
+	auto tCascadeEnd = std::chrono::high_resolution_clock::now();
 
 	// ---- Unground check: re-group freed sections so they collide correctly ----
 	// A section that can no longer reach a static anchor must collide with the standing
@@ -1218,9 +1298,9 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		JPH_PROFILE("Destruct:Unground");
 		// Reuse the snapshot built by the deformation pass; it is rebuilt here only if a frame
 		// joint broke since (deformation / cascade / support-stability), which changes the count.
-		ensureFrameSnapshot();
-		const UnorderedMap<BodyID, Array<int>> &uadj     = sharedFrameAdj;
-		const UnorderedSet<BodyID>             &grounded = sharedGrounded;
+		EnsureFrameSnapshot();
+		const UnorderedMap<BodyID, Array<int>> &uadj     = mSnapFrameAdj;
+		const UnorderedSet<BodyID>             &grounded = mSnapGrounded;
 
 		const BodyLockInterfaceNoLock &bli = mPhysicsSystem->GetBodyLockInterfaceNoLock();
 
@@ -1336,6 +1416,20 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 
 	auto t1 = std::chrono::high_resolution_clock::now();
 	mLastBreakCheckUs = std::chrono::duration<float, std::micro>(t1 - t0).count();
+
+	// Spike diagnostic: on frames where our PrePhysicsUpdate work exceeds the threshold, print the
+	// breakdown so an in-the-moment spike self-reports which pass is responsible. (Temporary.)
+	{
+		using ms = std::chrono::duration<float, std::milli>;
+		float total_ms   = ms(t1 - t0).count();
+		float deform_ms  = ms(tCascadeStart - tDeformStart).count();
+		float cascade_ms = ms(tCascadeEnd - tCascadeStart).count();
+		float other_ms   = total_ms - deform_ms - cascade_ms;
+		static constexpr float cSpikeThresholdMs = 2.5f;
+		if (total_ms > cSpikeThresholdMs)
+			printf("[DESTRUCT SPIKE] total=%.2f ms | deform=%.2f | cascade(scope+grav+struct+support)=%.2f | other(below+damage+panel+iso+unground+zeroconn)=%.2f\n",
+				total_ms, deform_ms, cascade_ms, other_ms);
+	}
 }
 
 // ---------------------------------------------------------------------------
