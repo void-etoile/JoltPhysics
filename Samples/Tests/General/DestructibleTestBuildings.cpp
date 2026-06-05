@@ -1180,3 +1180,155 @@ void DestructibleTest::BuildEiffelTower(RVec3Arg inCenter)
 			frameC(legBeams[i][NumLevels - 1], ant);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// BuildCastle
+// Square keep-and-curtain-wall castle: four crenellated corner towers, four
+// curtain walls (front wall has a gate opening) and a taller central keep.
+// Everything follows the standard frame/panel pattern so it destructs like the
+// other structures: posts sit on static stubs, beams are frame constraints,
+// wall infill panels are fixed constraints, merlons are light frame elements.
+// ---------------------------------------------------------------------------
+
+void DestructibleTest::BuildCastle(RVec3Arg inCenter, float inHalfSize)
+{
+	const float H          = inHalfSize;  // half footprint
+	const float stubH      = 0.5f;
+	const float wallH      = 4.0f;        // curtain-wall column height
+	const float postHalf   = 0.3f;        // post cross-section half
+	const float beamHalfT  = 0.25f;       // beam half-thickness (non-length axes)
+	const float merlonHalf = 0.35f;
+	const float merlonH    = 0.7f;
+	const float panelThick = 0.15f;
+
+	Ref<GroupFilterTable> filter = new GroupFilterTable(1);
+	uint32 gid = mNextBuildingGroupID++;
+
+	auto addBody = [&](RVec3Arg lPos, QuatArg rot, RefConst<Shape> sh, EMotionType mt, ObjectLayer ol, float mass) -> Body *
+	{
+		BodyCreationSettings bcs(sh, inCenter + lPos, rot, mt, ol);
+		if (mt != EMotionType::Static)
+		{
+			bcs.mOverrideMassProperties       = EOverrideMassProperties::CalculateInertia;
+			bcs.mMassPropertiesOverride.mMass = mass;
+		}
+		Body *b = mBodyInterface->CreateBody(bcs);
+		b->SetCollisionGroup(CollisionGroup(filter, gid, 0));
+		mBodyInterface->AddBody(b->GetID(), EActivation::DontActivate);
+		return b;
+	};
+
+	auto frameC = [&](Body *a, Body *b) { if (a != nullptr && b != nullptr) TrackConstraint(true,  a, b); };
+	auto panelC = [&](Body *a, Body *b) { if (a != nullptr && b != nullptr) TrackConstraint(false, a, b); };
+
+	auto regElem = [&](Body *b, Vec3 lCenter, Vec3 he, int pieces, bool isFrame)
+	{
+		RVec3 wp = inCenter + RVec3(lCenter);
+		uint32 seed = uint32(int(float(wp.GetX()) * 100.0f) * 73856093u
+			^ int(float(wp.GetY()) * 100.0f) * 19349663u
+			^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
+		FractureInfo info;
+		info.mIsFrame = isFrame;
+		sGenerateFractureShapes(he, seed, pieces, info.mShapes, info.mLocalCenters);
+		mFractureData[b->GetID()] = info;
+	};
+
+	RefConst<Shape> s_stub   = new BoxShape(Vec3(postHalf, stubH * 0.5f, postHalf));
+	RefConst<Shape> s_merlon = new BoxShape(Vec3(merlonHalf, merlonH * 0.5f, merlonHalf));
+
+	// Grounded vertical column: static stub + nSeg dynamic segments, frame-linked. Returns top segment.
+	auto buildColumn = [&](float x, float z, int nSeg, float segH) -> Body *
+	{
+		RefConst<Shape> s_col = new BoxShape(Vec3(postHalf, segH * 0.5f, postHalf));
+		Body *stub = addBody(RVec3(x, stubH * 0.5f, z), Quat::sIdentity(), s_stub, EMotionType::Static, Layers::NON_MOVING, 0.0f);
+		Body *prev = stub, *top = nullptr;
+		for (int s = 0; s < nSeg; ++s)
+		{
+			float y = stubH + segH * 0.5f + s * segH;
+			Body *seg = addBody(RVec3(x, y, z), Quat::sIdentity(), s_col, EMotionType::Dynamic, Layers::MOVING, 120.0f);
+			regElem(seg, Vec3(x, y, z), Vec3(postHalf, segH * 0.5f, postHalf), 3, true);
+			frameC(prev, seg);
+			prev = seg;
+			top = seg;
+		}
+		return top;
+	};
+
+	// Place merlons (crenellations) along a wall-top span, attached to the supplied beam.
+	auto crenellate = [&](float ax, float az, float bx, float bz, float y, Body *inBeam)
+	{
+		const float fr[2] = { 0.25f, 0.75f };
+		for (float f : fr)
+		{
+			float mx = ax + (bx - ax) * f;
+			float mz = az + (bz - az) * f;
+			Body *m = addBody(RVec3(mx, y + merlonH * 0.5f, mz), Quat::sIdentity(), s_merlon,
+				EMotionType::Dynamic, Layers::MOVING, 25.0f);
+			regElem(m, Vec3(mx, y + merlonH * 0.5f, mz), Vec3(merlonHalf, merlonH * 0.5f, merlonHalf), 2, true);
+			frameC(inBeam, m);
+		}
+	};
+
+	// Curtain wall between two corners; hasGate leaves the central panel open as a gateway.
+	auto buildWall = [&](float x0, float z0, float x1, float z1, bool hasGate)
+	{
+		float dx = x1 - x0, dz = z1 - z0;
+		float len = sqrtf(dx * dx + dz * dz);
+		int   nSeg = JPH::max(1, (int)(len / 3.0f + 0.5f));
+		float yaw = atan2f(dz, dx);
+		Quat  rot = Quat::sRotation(Vec3::sAxisY(), yaw);
+		float segLen = len / nSeg;
+
+		Array<Body *> posts(nSeg + 1);
+		for (int i = 0; i <= nSeg; ++i)
+		{
+			float t = (float)i / nSeg;
+			posts[i] = buildColumn(x0 + dx * t, z0 + dz * t, 1, wallH);
+		}
+
+		int gateSeg = hasGate ? nSeg / 2 : -1;
+		float topY = stubH + wallH;
+		RefConst<Shape> s_beam  = new BoxShape(Vec3(segLen * 0.5f - postHalf, beamHalfT, beamHalfT));
+		RefConst<Shape> s_panel = new BoxShape(Vec3(segLen * 0.5f - postHalf, wallH * 0.5f - 0.4f, panelThick));
+
+		for (int i = 0; i < nSeg; ++i)
+		{
+			float t0 = (float)i / nSeg, t1 = (float)(i + 1) / nSeg, tm = (t0 + t1) * 0.5f;
+			float mx = x0 + dx * tm, mz = z0 + dz * tm;
+
+			Body *beam = addBody(RVec3(mx, topY, mz), rot, s_beam, EMotionType::Dynamic, Layers::MOVING, 35.0f);
+			regElem(beam, Vec3(mx, topY, mz), Vec3(segLen * 0.5f - postHalf, beamHalfT, beamHalfT), 3, true);
+			frameC(posts[i], beam);
+			frameC(posts[i + 1], beam);
+
+			if (i != gateSeg)
+			{
+				float py = stubH + wallH * 0.5f;
+				Body *panel = addBody(RVec3(mx, py, mz), rot, s_panel, EMotionType::Dynamic, Layers::MOVING, 18.0f);
+				regElem(panel, Vec3(mx, py, mz), Vec3(segLen * 0.5f - postHalf, wallH * 0.5f - 0.4f, panelThick), cFracturePieces, false);
+				panelC(posts[i], panel);
+				panelC(posts[i + 1], panel);
+			}
+
+			crenellate(x0 + dx * t0, z0 + dz * t0, x0 + dx * t1, z0 + dz * t1, topY + beamHalfT, beam);
+		}
+	};
+
+	// Four octagonal corner towers — the same BuildTower structures used elsewhere in the
+	// scene, scaled down to 3 floors / 2.5 m radius. Each is its own grouped building.
+	const float towerRadius = 2.5f;
+	BuildTower(inCenter + RVec3(-H, 0, -H), 3, towerRadius, 8);
+	BuildTower(inCenter + RVec3(+H, 0, -H), 3, towerRadius, 8);
+	BuildTower(inCenter + RVec3(+H, 0, +H), 3, towerRadius, 8);
+	BuildTower(inCenter + RVec3(-H, 0, +H), 3, towerRadius, 8);
+
+	// Curtain walls run between the inner edges of the corner towers
+	float wIn = H - towerRadius - 0.5f;
+	buildWall(-wIn, -H, +wIn, -H, true);   // front wall with gate
+	buildWall(-wIn, +H, +wIn, +H, false);  // back wall
+	buildWall(-H, -wIn, -H, +wIn, false);  // left wall
+	buildWall(+H, -wIn, +H, +wIn, false);  // right wall
+
+	// Central keep — a taller, wider octagonal tower (6 floors / 3.5 m radius)
+	BuildTower(inCenter, 6, 3.5f, 8);
+}

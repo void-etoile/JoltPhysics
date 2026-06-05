@@ -8,6 +8,7 @@
 #include <Jolt/Core/UnorderedMap.h>
 #include <Jolt/Core/UnorderedSet.h>
 #include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Core/Profiler.h>
 #include <chrono>
 #include <algorithm>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -98,16 +99,19 @@ void DestructibleTest::TrackConstraint(bool inIsFrame, Body *inA, Body *inB)
 	}
 }
 
-void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos, bool inSpikeDamage)
+void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos)
 {
 	if (inIsFrame)
 	{
 		SixDOFConstraint *c = mFrameConstraints[inPos].GetPtr();
 		mConstraintRestRot.erase(c);
+		mJointYieldTime.erase(c);
 		BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
 
 		mRecentlyBrokenFrameBodies.insert(id1);
 		mRecentlyBrokenFrameBodies.insert(id2);
+		mConnDirty.insert(id1);
+		mConnDirty.insert(id2);
 
 		if (--mFrameConnCount[id1] == 0) mFrameConnCount.erase(id1);
 		if (--mFrameConnCount[id2] == 0) mFrameConnCount.erase(id2);
@@ -142,35 +146,13 @@ void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos, bool inSpike
 			mFrameIdx[mFrameConstraints[inPos].GetPtr()] = inPos;
 		}
 		mFrameConstraints.pop_back();
-
-		// Only spike bodies that had exactly 2 frame connections (bridge-like beams supported
-		// at both ends) and just lost one end — they are now cantilevered and would snap free.
-		auto spikeBeamDamage = [&](BodyID id)
-		{
-			if (mBodyInterface->GetMotionType(id) != EMotionType::Dynamic) return;
-			auto fit = mFractureData.find(id);
-			if (fit == mFractureData.end() || !fit->second.mIsFrame) return;
-			if (fit->second.mInitialFrameConnCount != 2) return;
-			auto cit = mFrameConnCount.find(id);
-			int remaining = (cit != mFrameConnCount.end()) ? cit->second : 0;
-			if (remaining == 1)
-			{
-				auto dit = mChunkDamage.find(id);
-				if (dit != mChunkDamage.end())
-					dit->second += sFrameBreakForce * 2.0f;
-			}
-		};
-
-		if (inSpikeDamage)
-		{
-			spikeBeamDamage(id1);
-			spikeBeamDamage(id2);
-		}
 	}
 	else
 	{
 		FixedConstraint *c = mPanelConstraints[inPos].GetPtr();
 		BodyID id1 = c->GetBody1()->GetID(), id2 = c->GetBody2()->GetID();
+		mConnDirty.insert(id1);
+		mConnDirty.insert(id2);
 
 		if (--mPanelConnCount[id1] == 0) mPanelConnCount.erase(id1);
 		if (--mPanelConnCount[id2] == 0) mPanelConnCount.erase(id2);
@@ -205,26 +187,6 @@ void DestructibleTest::UntrackConstraint(bool inIsFrame, int inPos, bool inSpike
 			mPanelIdx[mPanelConstraints[inPos].GetPtr()] = inPos;
 		}
 		mPanelConstraints.pop_back();
-
-		auto spikeFloorDamage = [&](BodyID id)
-		{
-			auto fit = mFractureData.find(id);
-			if (fit == mFractureData.end() || !fit->second.mIsFloor) return;
-			auto remaining_it = mPanelConnCount.find(id);
-			int remaining = (remaining_it != mPanelConnCount.end()) ? remaining_it->second : 0;
-			if (remaining * 2 <= fit->second.mInitialConnCount)
-			{
-				auto dmg_it = mChunkDamage.find(id);
-				if (dmg_it != mChunkDamage.end())
-					dmg_it->second += sFloorBreakForce;
-			}
-		};
-
-		if (inSpikeDamage)
-		{
-			spikeFloorDamage(id1);
-			spikeFloorDamage(id2);
-		}
 	}
 }
 
@@ -238,9 +200,23 @@ float DestructibleTest::sFrameBreakForce     =   500.0f;
 float DestructibleTest::sFrameBreakMoment    =  5000.0f;  // N·m — motor yield torque; baked at constraint creation
 float DestructibleTest::sFrameBreakAxial     =  2000.0f;  // N  — lateral shear force to break a joint
 float DestructibleTest::sFrameBendThreshold  =     0.20f; // rad — deformation angle before a joint breaks
-float DestructibleTest::sFrameSpringStiffness =  50000.0f; // N·m/rad — 10× lower than original for fewer solver iterations
-float DestructibleTest::sFrameSpringDamping  =  30000.0f; // N·m·s/rad — scaled proportionally with stiffness
+// Stiff enough to feel like concrete/steel (joint deflects a fraction of a degree under working
+// load before its motor saturates at sFrameBreakMoment, then flows plastically and the yield/bend
+// checks take over) but kept at the original known-stable value: pushing stiffness much higher
+// makes the spring's effective frequency exceed what the solver can integrate at 60 Hz for these
+// body inertias, which injects energy and sends bodies flying. Overdamped so there is no wobble.
+float DestructibleTest::sFrameSpringStiffness = 500000.0f; // N·m/rad
+float DestructibleTest::sFrameSpringDamping  = 300000.0f;  // N·m·s/rad
 float DestructibleTest::sFrameSwayBreakRate  =     1.0f;  // rad/s — snap joints that are already whipping
+float DestructibleTest::sFrameYieldAngle     =     0.04f; // rad — past the elastic limit (≈ break moment / stiffness): joint is yielding
+float DestructibleTest::sFrameYieldTimeLimit =     0.5f;  // s — a joint held in sustained yield this long fractures
+// Impact damage = relV * min(m_reduced, sStructuralMassCap). Capping the EFFECTIVE MASS (not the
+// final impulse) keeps damage proportional to impact velocity — a hard ground strike still breaks
+// frame elements (so falling sections shatter on landing) while gentle settling does not — but a
+// very heavy body can't produce the unbounded damage that previously pulverized whole sections in
+// one frame. With cap 80 kg: a frame element (threshold 500 N·s) breaks at relV ≳ 6 m/s, survives
+// a slow settle; panels/floors (lower thresholds) break at correspondingly lower speeds.
+float DestructibleTest::sStructuralMassCap   =    80.0f;  // kg
 
 // ---------------------------------------------------------------------------
 // Initialize
@@ -264,7 +240,9 @@ void DestructibleTest::Initialize()
 	mPanelIdx.clear();
 	mChunkDamage.clear();
 	mConstraintRestRot.clear();
+	mJointYieldTime.clear();
 	mRecentlyBrokenFrameBodies.clear();
+	mConnDirty.clear();
 	mNextBuildingGroupID = 1;
 	{
 		std::lock_guard<std::mutex> lock(mDamageMutex);
@@ -272,7 +250,7 @@ void DestructibleTest::Initialize()
 		mHitProjectiles.clear();
 	}
 
-	CreateFloor();
+	CreateFloor(800.0f);
 	BuildMainWall();
 
 	// City block
@@ -293,9 +271,25 @@ void DestructibleTest::Initialize()
 	BuildApartment  (RVec3(41, 0, +25), 4, 3.0f, 2.0f);
 	BuildHouse      (RVec3(52, 0, +25));
 
+	// Second residential block — wider/taller variants and a suburban house row
+	BuildApartment  (RVec3(16, 0, -45), 5, 4.0f, 3.0f);
+	BuildApartment  (RVec3(30, 0, -45), 6, 3.0f, 2.5f);
+	BuildApartment  (RVec3(44, 0, -45), 3, 4.5f, 2.0f);
+	BuildHouse      (RVec3(56, 0, -45));
+	BuildHouse      (RVec3(16, 0, +45));
+	BuildHouse      (RVec3(26, 0, +45));
+	BuildApartment  (RVec3(38, 0, +45), 4, 3.5f, 3.0f);
+	BuildApartment  (RVec3(52, 0, +45), 7, 3.0f, 2.0f);
+
 	// Landmark structures
 	BuildTower      (RVec3(72, 0, 0), 20, 4.0f, 8);
 	BuildHighrise   (RVec3(95, 0, 0), 30, 3, 5.0f, 5.0f);
+	BuildTower      (RVec3(118, 0, 0), 12, 3.0f, 6);      // smaller hexagonal tower
+	BuildHighrise   (RVec3(140, 0, 0), 18, 2, 6.0f, 6.0f); // squat wide highrise
+	BuildEiffelTower(RVec3(230, 0, 0));
+
+	// Castle compound off to one side
+	BuildCastle     (RVec3(110, 0, -120), 22.0f);
 
 	// Seed per-chunk damage tracking for every registered fracture body
 	for (auto &kv : mFractureData)
@@ -304,10 +298,6 @@ void DestructibleTest::Initialize()
 	mInitialPanelCount = (int)mPanelConstraints.size();
 	mInitialFrameCount = (int)mFrameConstraints.size();
 	mLastBreakCheckUs  = 0.0f;
-	mBreakLogCount     = 0;
-
-	if (mLogFile) fclose(mLogFile);
-	mLogFile = fopen("/tmp/jolt_log.txt", "w");
 
 	// Register ourselves as the contact listener so OnContactAdded fires for all impacts
 	mPhysicsSystem->SetContactListener(this);
@@ -316,6 +306,37 @@ void DestructibleTest::Initialize()
 // ---------------------------------------------------------------------------
 // ContactListener: accumulate impact impulses on the physics thread
 // ---------------------------------------------------------------------------
+
+void DestructibleTest::OnContactPersisted(const Body &inBody1, const Body &inBody2,
+	const ContactManifold &inManifold, ContactSettings & /*ioSettings*/)
+{
+	// Only care about falling structural elements pressing against remaining structure.
+	// Uses a higher threshold than OnContactAdded to ignore resting contact noise.
+	if (inBody1.GetObjectLayer() == Layers::DEBRIS || inBody2.GetObjectLayer() == Layers::DEBRIS)
+		return;
+
+	Vec3  v1   = inBody1.GetLinearVelocity();
+	Vec3  v2   = inBody2.GetLinearVelocity();
+	float relV = (v1 - v2).Dot(inManifold.mWorldSpaceNormal);
+
+	static constexpr float cMinPersistVelocity = 2.0f; // m/s — filters out resting/settling contact
+	if (relV < cMinPersistVelocity)
+		return;
+
+	float inv_m1 = inBody1.IsDynamic() ? inBody1.GetMotionProperties()->GetInverseMass() : 0.0f;
+	float inv_m2 = inBody2.IsDynamic() ? inBody2.GetMotionProperties()->GetInverseMass() : 0.0f;
+	float inv_sum = inv_m1 + inv_m2;
+	if (inv_sum <= 0.0f)
+		return;
+
+	// Damage scales with impact velocity; effective mass is capped so a heavy section landing
+	// breaks elements on a hard strike without pulverizing everything in one frame.
+	float impulse = relV * JPH::min(1.0f / inv_sum, sStructuralMassCap);
+
+	std::lock_guard<std::mutex> lock(mDamageMutex);
+	mPendingDamage.push_back({ inBody1.GetID(), impulse });
+	mPendingDamage.push_back({ inBody2.GetID(), impulse });
+}
 
 void DestructibleTest::OnContactAdded(const Body &inBody1, const Body &inBody2,
 	const ContactManifold &inManifold, ContactSettings & /*ioSettings*/)
@@ -343,7 +364,21 @@ void DestructibleTest::OnContactAdded(const Body &inBody1, const Body &inBody2,
 	if (inv_sum <= 0.0f)
 		return;
 
-	float impulse = relV / inv_sum;
+	BodyID id1 = inBody1.GetID(), id2 = inBody2.GetID();
+	bool isProjectile = mProjectileSet.find(id1) != mProjectileSet.end()
+		|| mProjectileSet.find(id2) != mProjectileSet.end();
+
+	float m_reduced = 1.0f / inv_sum;
+	float impulse;
+	if (isProjectile)
+		// A direct projectile hit must reliably cut frame elements — use full reduced mass and
+		// guarantee at least enough damage to exceed the frame break threshold.
+		impulse = JPH::max(relV * m_reduced, sFrameBreakForce * 1.2f);
+	else
+		// Structural collision (falling section landing on the ground or lower structure):
+		// damage scales with impact velocity, effective mass capped so hard strikes break
+		// elements but a slow settle does not, and nothing pulverizes in a single frame.
+		impulse = relV * JPH::min(m_reduced, sStructuralMassCap);
 
 	// Push to staging buffer — drained on the main thread in PrePhysicsUpdate.
 	std::lock_guard<std::mutex> lock(mDamageMutex);
@@ -352,7 +387,6 @@ void DestructibleTest::OnContactAdded(const Body &inBody1, const Body &inBody2,
 
 	// If either body is a projectile, schedule immediate removal.
 	// mProjectileSet is written only on the main thread between steps, so reading here is safe.
-	BodyID id1 = inBody1.GetID(), id2 = inBody2.GetID();
 	if (mProjectileSet.find(id1) != mProjectileSet.end()) mHitProjectiles.push_back(id1);
 	if (mProjectileSet.find(id2) != mProjectileSet.end()) mHitProjectiles.push_back(id2);
 }
@@ -399,6 +433,7 @@ void DestructibleTest::SpawnFracture(BodyID inPanelID)
 	if (it == mFractureData.end())
 		return;
 
+	JPH_PROFILE("Destruct:SpawnFracture");
 	FractureInfo &info  = it->second;
 	RVec3 panel_pos     = mBodyInterface->GetCenterOfMassPosition(inPanelID);
 	Quat  panel_rot     = mBodyInterface->GetRotation(inPanelID);
@@ -526,14 +561,39 @@ UnorderedMap<BodyID, Array<int>> DestructibleTest::BuildFrameAdjacency() const
 	return adj;
 }
 
+void DestructibleTest::ComputeGroundedSet(const UnorderedMap<BodyID, Array<int>> &inAdj, UnorderedSet<BodyID> &outGrounded)
+{
+	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
+	Array<BodyID> queue;
+	for (auto &kv : inAdj)
+		if (binl.GetMotionType(kv.first) == EMotionType::Static)
+			if (outGrounded.insert(kv.first).second)
+				queue.push_back(kv.first);
+	for (int qi = 0; qi < (int)queue.size(); ++qi)
+	{
+		auto it = inAdj.find(queue[qi]);
+		if (it == inAdj.end()) continue;
+		for (int ci : it->second)
+		{
+			SixDOFConstraint *c = mFrameConstraints[ci];
+			BodyID other = (c->GetBody1()->GetID() == queue[qi]) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
+			if (outGrounded.insert(other).second)
+				queue.push_back(other);
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CheckStructuralIntegrity — BFS from ground; detach unsupported chunks
 // ---------------------------------------------------------------------------
 
 void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope)
 {
+	JPH_PROFILE("Destruct:StructuralIntegrity");
 	if (mFrameConstraints.empty())
 		return;
+
+	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
 
 	auto adj = BuildFrameAdjacency();
 
@@ -541,7 +601,7 @@ void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inSc
 	Array<BodyID> queue;
 
 	for (auto &kv : adj)
-		if (mBodyInterface->GetMotionType(kv.first) == EMotionType::Static)
+		if (binl.GetMotionType(kv.first) == EMotionType::Static)
 			if (reachable.insert(kv.first).second)
 				queue.push_back(kv.first);
 
@@ -574,7 +634,7 @@ void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inSc
 		bool b1 = unsupported.find(c->GetBody1()->GetID()) != unsupported.end();
 		bool b2 = unsupported.find(c->GetBody2()->GetID()) != unsupported.end();
 		if (b1 != b2)
-			UntrackConstraint(true, i, /*inSpikeDamage=*/false);
+			UntrackConstraint(true, i);
 		else
 			++i;
 	}
@@ -597,14 +657,17 @@ void DestructibleTest::CheckStructuralIntegrity(const UnorderedSet<BodyID> &inSc
 
 void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope)
 {
+	JPH_PROFILE("Destruct:GravitationalMoment");
 	if (mFrameConstraints.empty())
 		return;
 
 	static constexpr float cGravity = 9.81f;
 
+	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
+
 	auto adj = BuildFrameAdjacency();
 
-	const BodyLockInterfaceLocking &bli = mPhysicsSystem->GetBodyLockInterface();
+	const BodyLockInterfaceNoLock &bli = mPhysicsSystem->GetBodyLockInterfaceNoLock();
 
 	UnorderedMap<BodyID, int>   disc, low;
 	UnorderedMap<BodyID, float> stMass;
@@ -624,7 +687,7 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 	{
 		BodyID seed = startKV.first;
 		if (disc.find(seed) != disc.end()) continue;
-		if (mBodyInterface->GetMotionType(seed) != EMotionType::Static) continue;
+		if (binl.GetMotionType(seed) != EMotionType::Static) continue;
 		if (inScope.find(seed) == inScope.end()) continue;
 
 		disc[seed] = low[seed] = timer++;
@@ -664,7 +727,7 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 						BodyLockRead lock(bli, next);
 						if (lock.Succeeded() && lock.GetBody().IsDynamic())
 							mass = 1.0f / lock.GetBody().GetMotionProperties()->GetInverseMass();
-						RVec3 pos = mBodyInterface->GetCenterOfMassPosition(next);
+						RVec3 pos = binl.GetCenterOfMassPosition(next);
 						stMass[next] = mass;
 						stComW[next] = Vec3(pos) * mass;
 					}
@@ -689,12 +752,12 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 					// Skip foundation connections (par is a static stub): the building's COM is
 					// never directly above a single corner stub, so the moment would always be
 					// enormous and every base joint would break immediately.
-					const bool parIsStatic = mBodyInterface->GetMotionType(par) == EMotionType::Static;
+					const bool parIsStatic = binl.GetMotionType(par) == EMotionType::Static;
 					if (!parIsStatic && low[cur] > disc[par] && stMass[cur] > 0.0f)
 					{
 						SixDOFConstraint *bridgeC = mFrameConstraints[parentEdge];
-						RVec3 posA     = mBodyInterface->GetCenterOfMassPosition(bridgeC->GetBody1()->GetID());
-						RVec3 posB     = mBodyInterface->GetCenterOfMassPosition(bridgeC->GetBody2()->GetID());
+						RVec3 posA     = binl.GetCenterOfMassPosition(bridgeC->GetBody1()->GetID());
+						RVec3 posB     = binl.GetCenterOfMassPosition(bridgeC->GetBody2()->GetID());
 						RVec3 attachPt = (posA + posB) * 0.5f;
 
 						Vec3  comWorld  = stComW[cur] / stMass[cur];
@@ -702,13 +765,6 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 						float horizOff  = Vec3(comOffset.GetX(), 0.0f, comOffset.GetZ()).Length();
 						float axial     = stMass[cur] * cGravity;
 						float moment    = axial * horizOff;
-
-						if (mLogFile)
-						{
-							fprintf(mLogFile, "[BRIDGE ci=%d] totalMass=%.0f axial=%.0f moment=%.0f horizOff=%.2f (axialThresh=%.0f momentThresh=%.0f)\n",
-								parentEdge, stMass[cur], axial, moment, horizOff, sFrameBreakAxial, sFrameBreakMoment);
-							fflush(mLogFile);
-						}
 
 						if (moment > sFrameBreakMoment)
 							toBreak.push_back(parentEdge);
@@ -741,8 +797,11 @@ void DestructibleTest::CheckGravitationalMoment(const UnorderedSet<BodyID> &inSc
 
 void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope)
 {
+	JPH_PROFILE("Destruct:SupportStability");
 	if (mFractureData.empty() || mFrameConstraints.empty())
 		return;
+
+	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
 
 	auto adj = BuildFrameAdjacency();
 
@@ -769,9 +828,9 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 		{
 			BodyID cur = queue[qi];
 
-			if (mBodyInterface->GetMotionType(cur) == EMotionType::Static)
+			if (binl.GetMotionType(cur) == EMotionType::Static)
 			{
-				RVec3 pos = mBodyInterface->GetCenterOfMassPosition(cur);
+				RVec3 pos = binl.GetCenterOfMassPosition(cur);
 				float px = (float)pos.GetX(), pz = (float)pos.GetZ();
 				if (px < ci.minX) ci.minX = px;
 				if (px > ci.maxX) ci.maxX = px;
@@ -815,7 +874,7 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 		const CompInfo &ci = comps[compIt->second];
 		if (!ci.hasStub) continue;
 
-		RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
+		RVec3 pos = binl.GetCenterOfMassPosition(id);
 		float bx = (float)pos.GetX(), bz = (float)pos.GetZ();
 		if (bx < ci.minX - cTol || bx > ci.maxX + cTol ||
 		    bz < ci.minZ - cTol || bz > ci.maxZ + cTol)
@@ -828,13 +887,6 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 		if (budget-- <= 0) break;
 		if (mFractureData.find(id) == mFractureData.end()) continue;
 		mBodyInterface->ActivateBody(id);
-		if (mLogFile)
-		{
-			RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
-			fprintf(mLogFile, "[SUPPORT] XZ-unstable fracture at (%.1f,%.1f,%.1f)\n",
-				(float)pos.GetX(),(float)pos.GetY(),(float)pos.GetZ());
-			fflush(mLogFile);
-		}
 		SpawnFracture(id);
 	}
 }
@@ -845,6 +897,9 @@ void DestructibleTest::CheckSupportStability(const UnorderedSet<BodyID> &inScope
 
 void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 {
+	JPH_PROFILE("Destruct:PrePhysicsUpdate");
+	BodyInterface &binl = mPhysicsSystem->GetBodyInterfaceNoLock();
+
 	// ---- Fire projectile ----
 	if (mFire)
 	{
@@ -877,7 +932,7 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	// ---- Sleep shards ----
 	for (int i = (int)mShardBodies.size() - 1; i >= 0; --i)
 	{
-		if (!mBodyInterface->IsActive(mShardBodies[i]))
+		if (!binl.IsActive(mShardBodies[i]))
 		{
 			mBodyInterface->RemoveBody(mShardBodies[i]);
 			mBodyInterface->DestroyBody(mShardBodies[i]);
@@ -886,13 +941,19 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		}
 	}
 
+	// A frame joint must have broken for any structural section to come loose and fall/bend;
+	// until then the whole-scene structural passes (and the below-ground scan over every chunk)
+	// have nothing to act on. Computed here so the cleanup below can use it too.
+	const bool anyDamage = (int)mFrameConstraints.size() < mInitialFrameCount;
+
 	// ---- Below-ground cleanup: remove anything that has fallen through the floor ----
 	{
+		JPH_PROFILE("Destruct:BelowGround");
 		static constexpr float cFallThreshold = -10.0f;
 
 		for (int i = (int)mProjectiles.size() - 1; i >= 0; --i)
 		{
-			if ((float)mBodyInterface->GetCenterOfMassPosition(mProjectiles[i].mID).GetY() < cFallThreshold)
+			if ((float)binl.GetCenterOfMassPosition(mProjectiles[i].mID).GetY() < cFallThreshold)
 			{
 				mProjectileSet.erase(mProjectiles[i].mID);
 				mBodyInterface->RemoveBody(mProjectiles[i].mID);
@@ -904,7 +965,7 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 
 		for (int i = (int)mShardBodies.size() - 1; i >= 0; --i)
 		{
-			if ((float)mBodyInterface->GetCenterOfMassPosition(mShardBodies[i]).GetY() < cFallThreshold)
+			if ((float)binl.GetCenterOfMassPosition(mShardBodies[i]).GetY() < cFallThreshold)
 			{
 				mBodyInterface->RemoveBody(mShardBodies[i]);
 				mBodyInterface->DestroyBody(mShardBodies[i]);
@@ -913,11 +974,14 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			}
 		}
 
-		// Structural/panel bodies — remove constraints first, then the body itself.
+		// Structural/panel bodies — only freed sections (which exist only after a frame joint
+		// breaks) can sink through the floor; an attached chunk is held above ground. So skip the
+		// whole-scene position scan entirely until there is damage.
 		Array<BodyID> sunken;
-		for (auto &kv : mFractureData)
-			if ((float)mBodyInterface->GetCenterOfMassPosition(kv.first).GetY() < cFallThreshold)
-				sunken.push_back(kv.first);
+		if (anyDamage)
+			for (auto &kv : mFractureData)
+				if ((float)binl.GetCenterOfMassPosition(kv.first).GetY() < cFallThreshold)
+					sunken.push_back(kv.first);
 
 		for (BodyID id : sunken)
 		{
@@ -958,56 +1022,49 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	auto t0 = std::chrono::high_resolution_clock::now();
 
 	// ---- Apply pending contact damage ----
+	// Damage only ever increases here, so a chunk can only cross its threshold on a frame it
+	// received damage. Collect those bodies and check only them below (instead of the whole scene).
+	UnorderedSet<BodyID> damagedThisFrame;
 	{
+		JPH_PROFILE("Destruct:ApplyDamage");
 		std::lock_guard<std::mutex> lock(mDamageMutex);
 		for (auto &[id, impulse] : mPendingDamage)
 		{
 			auto it = mChunkDamage.find(id);
 			if (it != mChunkDamage.end())
+			{
 				it->second += impulse;
+				damagedThisFrame.insert(id);
+			}
 		}
 		mPendingDamage.clear();
 	}
 
 	// ---- Destroy chunks that exceeded their damage threshold ----
 	{
+		JPH_PROFILE("Destruct:DestroyChunks");
 		Array<BodyID> toDestroy;
-		for (auto &[id, damage] : mChunkDamage)
+		for (BodyID id : damagedThisFrame)
 		{
+			auto dit = mChunkDamage.find(id);
+			if (dit == mChunkDamage.end()) continue;
 			auto fit = mFractureData.find(id);
 			if (fit == mFractureData.end()) continue;
 			float threshold = fit->second.mIsFrame ? sFrameBreakForce :
 			                  fit->second.mIsFloor ? sFloorBreakForce : sPanelBreakForce;
-			if (damage >= threshold)
+			if (dit->second >= threshold)
 				toDestroy.push_back(id);
 		}
 		for (BodyID id : toDestroy)
-		{
-			if (mBreakLogCount < 50)
-			{
-				++mBreakLogCount;
-				auto fit = mFractureData.find(id);
-				bool isFrame = fit != mFractureData.end() && fit->second.mIsFrame;
-				auto dmgIt = mChunkDamage.find(id);
-				float dmg = dmgIt != mChunkDamage.end() ? dmgIt->second : 0.0f;
-				RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
-				printf("[CHUNK DESTROYED #%02d] type=%s  damage=%.1f  pos=(%.1f,%.1f,%.1f)\n",
-					mBreakLogCount, isFrame ? "FRAME" : "PANEL", dmg,
-					(float)pos.GetX(), (float)pos.GetY(), (float)pos.GetZ());
-				if (mLogFile)
-				{
-					fprintf(mLogFile, "[CHUNK DESTROYED #%02d] type=%s  damage=%.1f  pos=(%.1f,%.1f,%.1f)\n",
-						mBreakLogCount, isFrame ? "FRAME" : "PANEL", dmg,
-						(float)pos.GetX(), (float)pos.GetY(), (float)pos.GetZ());
-					fflush(mLogFile);
-				}
-			}
 			SpawnFracture(id); // removes body, constraints, and mChunkDamage[id]
-		}
 	}
 
 	// ---- Panel gap check: break panels pulled >5 cm from attachment ----
+	// Only runs once a frame joint has broken — until then the frame is rigid and panels,
+	// pinned to it, cannot be pulled apart, so scanning every panel each frame is wasted work.
+	if (anyDamage)
 	{
+		JPH_PROFILE("Destruct:PanelGap");
 		static constexpr float cPanelMaxGap = 0.05f;
 		for (int i = 0; i < (int)mPanelConstraints.size(); )
 		{
@@ -1032,42 +1089,67 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	}
 
 	// ---- Isolation check: free frame elements where BOTH endpoints have exactly 1 connection ----
-	for (int i = 0; i < (int)mFrameConstraints.size(); )
+	// A dangling pair can only arise after a frame joint has broken, so this is gated on anyDamage.
+	if (anyDamage)
 	{
-		SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
-		BodyID id1 = c->GetBody1()->GetID();
-		BodyID id2 = c->GetBody2()->GetID();
-		auto it1 = mFrameConnCount.find(id1);
-		auto it2 = mFrameConnCount.find(id2);
-		bool b1_iso = mBodyInterface->GetMotionType(id1) == EMotionType::Dynamic
-			&& it1 != mFrameConnCount.end() && it1->second == 1;
-		bool b2_iso = mBodyInterface->GetMotionType(id2) == EMotionType::Dynamic
-			&& it2 != mFrameConnCount.end() && it2->second == 1;
-		if (b1_iso && b2_iso)
+		JPH_PROFILE("Destruct:Isolation");
+		for (int i = 0; i < (int)mFrameConstraints.size(); )
 		{
-			mBodyInterface->ActivateBody(id1);
-			mBodyInterface->ActivateBody(id2);
-			if (mLogFile)
+			SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
+			BodyID id1 = c->GetBody1()->GetID();
+			BodyID id2 = c->GetBody2()->GetID();
+			auto it1 = mFrameConnCount.find(id1);
+			auto it2 = mFrameConnCount.find(id2);
+			bool b1_iso = binl.GetMotionType(id1) == EMotionType::Dynamic
+				&& it1 != mFrameConnCount.end() && it1->second == 1;
+			bool b2_iso = binl.GetMotionType(id2) == EMotionType::Dynamic
+				&& it2 != mFrameConnCount.end() && it2->second == 1;
+			if (b1_iso && b2_iso)
 			{
-				RVec3 p1 = mBodyInterface->GetCenterOfMassPosition(id1);
-				RVec3 p2 = mBodyInterface->GetCenterOfMassPosition(id2);
-				fprintf(mLogFile, "[ISOLATE] body1=(%.1f,%.1f,%.1f) cnt=%d  body2=(%.1f,%.1f,%.1f) cnt=%d\n",
-					(float)p1.GetX(),(float)p1.GetY(),(float)p1.GetZ(), it1->second,
-					(float)p2.GetX(),(float)p2.GetY(),(float)p2.GetZ(), it2->second);
-				fflush(mLogFile);
+				mBodyInterface->ActivateBody(id1);
+				mBodyInterface->ActivateBody(id2);
+				UntrackConstraint(true, i);
 			}
-			UntrackConstraint(true, i);
+			else ++i;
 		}
-		else ++i;
 	}
 
-	// ---- Deformation failure: break frame joints that have bent past the threshold ----
+	// Shared frame-graph snapshot (adjacency + ground-reachable set) reused by the deformation
+	// and unground passes — both need exactly this. Built on first use and reused unless a frame
+	// joint breaks in between (tracked by the constraint count, which only ever decreases here).
+	UnorderedMap<BodyID, Array<int>> sharedFrameAdj;
+	UnorderedSet<BodyID>             sharedGrounded;
+	int snapshotFrameCount = -1;
+	auto ensureFrameSnapshot = [&]()
 	{
+		if (snapshotFrameCount == (int)mFrameConstraints.size())
+			return; // still valid — no frame joint broke since it was built
+		sharedFrameAdj = BuildFrameAdjacency();
+		sharedGrounded.clear();
+		ComputeGroundedSet(sharedFrameAdj, sharedGrounded);
+		snapshotFrameCount = (int)mFrameConstraints.size();
+	};
+
+	// ---- Deformation failure: break frame joints that have bent past the threshold ----
+	// Only check joints where at least one endpoint is still grounded (connected to a static stub).
+	// Joints between two freely-falling bodies carry no real structural load — any apparent
+	// deformation is solver noise that amplifies toward the top of a falling chain.
+	if (anyDamage)
+	{
+		JPH_PROFILE("Destruct:Deformation");
+		ensureFrameSnapshot();
+		const UnorderedSet<BodyID> &deformGrounded = sharedGrounded;
+
 		for (int i = (int)mFrameConstraints.size() - 1; i >= 0; --i)
 		{
 			SixDOFConstraint *c = mFrameConstraints[i].GetPtr();
 			Body *b1 = c->GetBody1(), *b2 = c->GetBody2();
+			// Cheap lock-free flag read; skips the bulk of sleeping joints in untouched buildings.
 			if (!b1->IsActive() && !b2->IsActive()) continue;
+
+			// Skip joints where neither side is grounded — they are in freefall together.
+			if (deformGrounded.find(b1->GetID()) == deformGrounded.end() &&
+			    deformGrounded.find(b2->GetID()) == deformGrounded.end()) continue;
 
 			auto restIt = mConstraintRestRot.find(c);
 			if (restIt == mConstraintRestRot.end()) continue;
@@ -1077,18 +1159,22 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			float bendAngle  = 2.0f * acosf(JPH::Clamp(abs(delta.GetW()), 0.0f, 1.0f));
 			float swayRate   = (b2->GetAngularVelocity() - b1->GetAngularVelocity()).Length();
 
+			// Sustained-yield accumulator: a joint bent past the elastic limit is plastically
+			// yielding.  Accumulate time while yielding, decay quickly while elastic.  This
+			// fractures overloaded cantilevers that settle into a stable bent equilibrium below
+			// the hard angle threshold (e.g. a corner that lost its columns but is still held by
+			// beams + floor slab on the remaining sides).
+			float &yieldTime = mJointYieldTime[c];
+			if (bendAngle > sFrameYieldAngle)
+				yieldTime += inParams.mDeltaTime;
+			else
+				yieldTime = JPH::max(0.0f, yieldTime - 2.0f * inParams.mDeltaTime);
+
 			bool angleBreak = bendAngle > sFrameBendThreshold;
 			bool swayBreak  = swayRate > sFrameSwayBreakRate && bendAngle > 0.05f;
-			if (angleBreak || swayBreak)
+			bool yieldBreak = yieldTime > sFrameYieldTimeLimit;
+			if (angleBreak || swayBreak || yieldBreak)
 			{
-				if (mLogFile)
-				{
-					RVec3 p = b1->GetCenterOfMassPosition();
-					fprintf(mLogFile, "[BREAK] %s angle=%.3f rad sway=%.3f rad/s pos=(%.1f,%.1f,%.1f)\n",
-						swayBreak ? "SWAY" : "ANGLE",
-						bendAngle, swayRate, (float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
-					fflush(mLogFile);
-				}
 				mBodyInterface->ActivateBody(b1->GetID());
 				mBodyInterface->ActivateBody(b2->GetID());
 				UntrackConstraint(true, i);
@@ -1103,6 +1189,7 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	UnorderedSet<BodyID> cascadeScope;
 	if (!mRecentlyBrokenFrameBodies.empty())
 	{
+		JPH_PROFILE("Destruct:CascadeScope");
 		auto cascAdj = BuildFrameAdjacency();
 		ExpandToComponents(mRecentlyBrokenFrameBodies, cascAdj, cascadeScope);
 		mRecentlyBrokenFrameBodies.clear(); // cascade's own breaks feed next frame
@@ -1117,29 +1204,131 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 	if (!cascadeScope.empty())
 		CheckSupportStability(cascadeScope);
 
-	// ---- Fracture bodies that have lost all their constraints ----
-	if (!mFractureData.empty())
+	// ---- Unground check: re-group freed sections so they collide correctly ----
+	// A section that can no longer reach a static anchor must collide with the standing
+	// structure below it, but NOT with its own connected neighbours (which touch at their
+	// joints).  Clearing to the invalid group makes a body collide with EVERYTHING including
+	// section-mates, whose overlapping joints then generate huge spurious contact forces that
+	// blow the section apart.  Instead, give each connected ungrounded component a fresh shared
+	// GroupID (keeping its filter / subgroup): mates share the id so rule "same group+subgroup =
+	// no collision" still holds, while a different id from the parent building lets the section
+	// collide with the structure it falls onto.
+	if (anyDamage && !mFrameConstraints.empty())
 	{
-		Array<BodyID> to_fracture;
-		for (auto &kv : mFractureData)
+		JPH_PROFILE("Destruct:Unground");
+		// Reuse the snapshot built by the deformation pass; it is rebuilt here only if a frame
+		// joint broke since (deformation / cascade / support-stability), which changes the count.
+		ensureFrameSnapshot();
+		const UnorderedMap<BodyID, Array<int>> &uadj     = sharedFrameAdj;
+		const UnorderedSet<BodyID>             &grounded = sharedGrounded;
+
+		const BodyLockInterfaceNoLock &bli = mPhysicsSystem->GetBodyLockInterfaceNoLock();
+
+		// A panel/floor body counts as grounded if any frame body it is panel-attached to is grounded.
+		auto panelGrounded = [&](BodyID id) -> bool
 		{
-			const UnorderedMap<BodyID, int> &cnt = kv.second.mIsFrame ? mFrameConnCount : mPanelConnCount;
-			if (cnt.find(kv.first) == cnt.end())
-				to_fracture.push_back(kv.first);
+			auto pit = mPanelAdj.find(id);
+			if (pit == mPanelAdj.end()) return false;
+			for (auto &cref : pit->second)
+			{
+				FixedConstraint *pc = cref.GetPtr();
+				BodyID o = (pc->GetBody1()->GetID() == id) ? pc->GetBody2()->GetID() : pc->GetBody1()->GetID();
+				if (grounded.find(o) != grounded.end()) return true;
+			}
+			return false;
+		};
+
+		auto setGroupID = [&](BodyID id, uint32 newGid)
+		{
+			BodyLockWrite lock(bli, id);
+			if (lock.Succeeded())
+			{
+				CollisionGroup g = lock.GetBody().GetCollisionGroup();
+				g.SetGroupID(newGid);
+				lock.GetBody().SetCollisionGroup(g);
+			}
+		};
+
+		// Flood each ungrounded component (through frame + panel links) with one fresh GroupID.
+		UnorderedSet<BodyID> visited;
+		for (auto &kv : uadj)
+		{
+			BodyID seed = kv.first;
+			if (binl.GetMotionType(seed) != EMotionType::Dynamic) continue;
+			if (grounded.find(seed) != grounded.end()) continue;
+			if (visited.find(seed) != visited.end()) continue;
+
+			uint32 newGid = mNextBuildingGroupID++;
+			Array<BodyID> q;
+			q.push_back(seed);
+			visited.insert(seed);
+
+			for (int qi = 0; qi < (int)q.size(); ++qi)
+			{
+				BodyID cur = q[qi];
+				setGroupID(cur, newGid);
+
+				auto fit = uadj.find(cur);
+				if (fit != uadj.end())
+					for (int ci : fit->second)
+					{
+						SixDOFConstraint *c = mFrameConstraints[ci];
+						BodyID o = (c->GetBody1()->GetID() == cur) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
+						if (binl.GetMotionType(o) == EMotionType::Dynamic
+							&& grounded.find(o) == grounded.end() && visited.insert(o).second)
+							q.push_back(o);
+					}
+
+				auto pit = mPanelAdj.find(cur);
+				if (pit != mPanelAdj.end())
+					for (auto &cref : pit->second)
+					{
+						FixedConstraint *pc = cref.GetPtr();
+						BodyID o = (pc->GetBody1()->GetID() == cur) ? pc->GetBody2()->GetID() : pc->GetBody1()->GetID();
+						if (binl.GetMotionType(o) == EMotionType::Dynamic
+							&& grounded.find(o) == grounded.end() && !panelGrounded(o) && visited.insert(o).second)
+							q.push_back(o);
+					}
+			}
 		}
+	}
+
+	// ---- Fracture bodies that have lost all their constraints ----
+	// Only bodies whose connection count changed this/last frame (mConnDirty) can be newly
+	// zero-connection, so we check just those rather than scanning the whole scene every frame.
+	if (!mConnDirty.empty())
+	{
+		JPH_PROFILE("Destruct:ZeroConnection");
+		Array<BodyID> to_fracture;
+		for (BodyID id : mConnDirty)
+		{
+			auto fit = mFractureData.find(id);
+			if (fit == mFractureData.end()) continue; // already fractured / gone
+			const UnorderedMap<BodyID, int> &cnt = fit->second.mIsFrame ? mFrameConnCount : mPanelConnCount;
+			if (cnt.find(id) == cnt.end())
+				to_fracture.push_back(id);
+		}
+		mConnDirty.clear();
+
+		// Clear collision group before fracturing so the body can collide during the brief window
+		// before it becomes debris — and so debris shards spawn in a state where they can land on structure.
+		{
+			const BodyLockInterfaceNoLock &bli2 = mPhysicsSystem->GetBodyLockInterfaceNoLock();
+			for (BodyID id : to_fracture)
+			{
+				BodyLockWrite lock(bli2, id);
+				if (lock.Succeeded()) lock.GetBody().SetCollisionGroup(CollisionGroup());
+			}
+		}
+
 		static constexpr int cMaxFracturesPerFrame = 3;
 		int budget = cMaxFracturesPerFrame;
 		for (BodyID id : to_fracture)
 		{
-			if (budget-- <= 0) break;
-			if (mLogFile)
+			if (budget-- <= 0)
 			{
-				RVec3 pos = mBodyInterface->GetCenterOfMassPosition(id);
-				auto fit = mFractureData.find(id);
-				fprintf(mLogFile, "[NOCONN] zero-connection fracture type=%s at (%.1f,%.1f,%.1f)\n",
-					(fit != mFractureData.end() && fit->second.mIsFrame) ? "FRAME" : "PANEL",
-					(float)pos.GetX(),(float)pos.GetY(),(float)pos.GetZ());
-				fflush(mLogFile);
+				mConnDirty.insert(id); // over budget — re-check next frame
+				continue;
 			}
 			SpawnFracture(id);
 		}
@@ -1184,11 +1373,20 @@ void DestructibleTest::CreateSettingsMenu(DebugUI *inUI, UIElement *inSubMenu)
 	inUI->CreateSlider(inSubMenu, "Bend Threshold (rad)", sFrameBendThreshold, 0.05f, 1.0f, 0.05f,
 		[](float inValue) { sFrameBendThreshold = inValue; });
 
-	inUI->CreateSlider(inSubMenu, "Frame Spring Stiffness (N\xc2\xb7m/rad)", sFrameSpringStiffness, 5000.0f, 500000.0f, 5000.0f,
+	inUI->CreateSlider(inSubMenu, "Frame Spring Stiffness (N\xc2\xb7m/rad)", sFrameSpringStiffness, 50000.0f, 3000000.0f, 50000.0f,
 		[](float inValue) { sFrameSpringStiffness = inValue; });
 
 	inUI->CreateSlider(inSubMenu, "Sway Break Rate (rad/s)", sFrameSwayBreakRate, 0.1f, 5.0f, 0.1f,
 		[](float inValue) { sFrameSwayBreakRate = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Yield Angle (rad)", sFrameYieldAngle, 0.01f, 0.20f, 0.01f,
+		[](float inValue) { sFrameYieldAngle = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Yield Time Limit (s)", sFrameYieldTimeLimit, 0.1f, 3.0f, 0.1f,
+		[](float inValue) { sFrameYieldTimeLimit = inValue; });
+
+	inUI->CreateSlider(inSubMenu, "Structural Mass Cap (kg)", sStructuralMassCap, 20.0f, 400.0f, 10.0f,
+		[](float inValue) { sStructuralMassCap = inValue; });
 
 	inUI->CreateTextButton(inSubMenu, "Reset", [this]() { RestartTest(); });
 }

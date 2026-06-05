@@ -56,7 +56,7 @@ public:
 	// ContactListener — accumulate per-body impact impulses on the physics thread
 	virtual ValidateResult	OnContactValidate(const Body &, const Body &, RVec3Arg, const CollideShapeResult &) override { return ValidateResult::AcceptAllContactsForThisBodyPair; }
 	virtual void			OnContactAdded(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override;
-	virtual void			OnContactPersisted(const Body &, const Body &, const ContactManifold &, ContactSettings &) override {}
+	virtual void			OnContactPersisted(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override;
 	virtual void			OnContactRemoved(const SubShapeIDPair &) override {}
 
 private:
@@ -66,8 +66,6 @@ private:
 		Array<Vec3>				mLocalCenters;	// centroid of each cell in panel local space
 		bool					mIsFrame = false; // true → break when frame constraints gone; false → panel constraints
 		bool					mIsFloor = false; // true → use sFloorBreakForce instead of sPanelBreakForce
-		int mInitialConnCount = 0;      // panel connections at construction time (floors only)
-		int mInitialFrameConnCount = 0; // frame connections at construction time (beams only)
 	};
 
 	void					FireProjectile(RVec3Arg inPos, Vec3Arg inDirection);
@@ -77,6 +75,7 @@ private:
 	void					BuildTower(RVec3Arg inCenter, int inNumFloors, float inRadius, int inNumSides);
 	void					BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inFloorsPerSeg, float inHalfW, float inHalfD);
 	void					BuildEiffelTower(RVec3Arg inCenter);
+	void					BuildCastle(RVec3Arg inCenter, float inHalfSize);
 	void					CheckStructuralIntegrity(const UnorderedSet<BodyID> &inScope);
 	void					CheckGravitationalMoment(const UnorderedSet<BodyID> &inScope);
 	void					CheckSupportStability(const UnorderedSet<BodyID> &inScope);
@@ -101,6 +100,11 @@ private:
 	// Rest-pose relative rotation per frame constraint (for deformation angle measurement).
 	UnorderedMap<SixDOFConstraint *, Quat>				mConstraintRestRot;
 
+	// Accumulated time (s) each frame joint has spent past the plastic-yield angle.
+	// A joint stuck in sustained yield (e.g. an overloaded cantilever at equilibrium) fractures
+	// once this exceeds sFrameYieldTimeLimit, even if it never reaches the hard bend threshold.
+	UnorderedMap<SixDOFConstraint *, float>				mJointYieldTime;
+
 	// Per-chunk accumulated damage (N·s). Filled from mPendingDamage each frame.
 	UnorderedMap<BodyID, float>							mChunkDamage;
 
@@ -118,25 +122,30 @@ private:
 	// Cleared just before the structural cascade so the cascade's own breaks feed into the next frame.
 	UnorderedSet<BodyID> mRecentlyBrokenFrameBodies;
 
+	// Bodies whose connection count changed (any constraint untracked) and so might now be
+	// zero-connection. Lets the zero-connection fracture pass check only these instead of
+	// scanning the whole scene every frame. Over-budget entries persist for the next frame.
+	UnorderedSet<BodyID> mConnDirty;
+
 	// Create a frame (SixDOFConstraint with spring motors) or panel (FixedConstraint) between inA and inB.
 	void					TrackConstraint(bool inIsFrame, Body *inA, Body *inB);
 
 	UnorderedMap<BodyID, Array<int>> BuildFrameAdjacency() const;
 
+	// BFS from all static (ground-anchor) bodies through the frame graph in inAdj; fills outGrounded
+	// with every body that can reach the ground. Shared by the deformation and unground passes.
+	void					ComputeGroundedSet(const UnorderedMap<BodyID, Array<int>> &inAdj, UnorderedSet<BodyID> &outGrounded);
+
 	// Expand inSeeds to all bodies in the same frame-constraint components, writing results into outScope.
 	void ExpandToComponents(const UnorderedSet<BodyID> &inSeeds, const UnorderedMap<BodyID, Array<int>> &inAdj, UnorderedSet<BodyID> &outScope) const;
 
 	// Swap-and-pop removal of the constraint at inPos; updates all indices.
-	// Pass inSpikeDamage=false when releasing a floating section rather than reacting to destruction,
-	// to suppress spikeBeamDamage / spikeFloorDamage cascades on surviving neighbours.
-	void					UntrackConstraint(bool inIsFrame, int inPos, bool inSpikeDamage = true);
+	void					UntrackConstraint(bool inIsFrame, int inPos);
 
 	uint32					mNextBuildingGroupID = 1;	// unique per-building so inter-building collision passes GroupFilterTable
 	int						mInitialPanelCount = 0;
 	int						mInitialFrameCount = 0;
 	float					mLastBreakCheckUs = 0.0f;
-	int						mBreakLogCount = 0;
-	FILE *					mLogFile = nullptr;
 
 	bool					mFire = false;
 	bool					mWasFire = false;
@@ -150,4 +159,7 @@ private:
 	static float			sFrameSpringStiffness;  // N·m/rad — rotational stiffness of frame joints
 	static float			sFrameSpringDamping;    // N·m·s/rad — rotational damping of frame joints
 	static float			sFrameSwayBreakRate;    // rad/s — relative angular velocity at which a joint snaps
+	static float			sFrameYieldAngle;       // rad — bend angle above which a joint is plastically yielding
+	static float			sFrameYieldTimeLimit;   // s — sustained yield duration before the joint fractures
+	static float			sStructuralMassCap;     // kg — effective-mass ceiling for non-projectile impact damage (damage = relV * min(m_reduced, cap))
 };
