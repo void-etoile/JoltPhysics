@@ -9,6 +9,8 @@
 #include <Jolt/Core/UnorderedSet.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Core/Profiler.h>
+#include <Jolt/Core/JobSystem.h>
+#include <Jolt/Core/Color.h>
 #include <chrono>
 #include <algorithm>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -236,7 +238,6 @@ float DestructibleTest::sFrameBendThreshold  =     0.20f; // rad — deformation
 // body inertias, which injects energy and sends bodies flying. Overdamped so there is no wobble.
 float DestructibleTest::sFrameSpringStiffness = 500000.0f; // N·m/rad
 float DestructibleTest::sFrameSpringDamping  = 300000.0f;  // N·m·s/rad
-float DestructibleTest::sFrameSwayBreakRate  =     1.0f;  // rad/s — snap joints that are already whipping
 float DestructibleTest::sFrameYieldAngle     =     0.04f; // rad — past the elastic limit (≈ break moment / stiffness): joint is yielding
 float DestructibleTest::sFrameYieldTimeLimit =     0.5f;  // s — a joint held in sustained yield this long fractures
 // Impact damage = relV * min(m_reduced, sStructuralMassCap). Capping the EFFECTIVE MASS (not the
@@ -275,6 +276,7 @@ void DestructibleTest::Initialize()
 	mBuildingFrameConstraints.clear();
 	mFrameConstraintBuilding.clear();
 	mDamagedBuildings.clear();
+	mRegroupedBodies.clear();
 	mCurrentBuildingGroup = 0;
 	mSnapFrameAdj.clear();
 	mSnapGrounded.clear();
@@ -284,6 +286,17 @@ void DestructibleTest::Initialize()
 		std::lock_guard<std::mutex> lock(mDamageMutex);
 		mPendingDamage.clear();
 		mHitProjectiles.clear();
+	}
+
+	// The SixDOF frame-joint spring motors hold a settled structure against gravity but leave a
+	// tiny residual velocity each solver step, which sits just above the default sleep threshold —
+	// so a damaged-but-standing building never sleeps and the solver re-solves all its joints every
+	// frame (a persistent ~1.8 ms after a collapse). Raising the point-velocity sleep threshold lets
+	// those near-static bodies go to sleep (well below any visible motion), removing that cost.
+	{
+		PhysicsSettings settings = mPhysicsSystem->GetPhysicsSettings();
+		settings.mPointVelocitySleepThreshold = 0.1f; // m/s (default 0.03)
+		mPhysicsSystem->SetPhysicsSettings(settings);
 	}
 
 	CreateFloor(800.0f);
@@ -434,10 +447,11 @@ void DestructibleTest::OnContactAdded(const Body &inBody1, const Body &inBody2,
 void DestructibleTest::ProcessInput(const ProcessInputParams &inParams)
 {
 	mFire = inParams.mKeyboard->IsKeyPressedAndTriggered(EKey::Return, mWasFire);
+	mDestroyBases = inParams.mKeyboard->IsKeyPressedAndTriggered(EKey::K, mWasDestroyBases);
 }
 
-void DestructibleTest::SaveInputState(StateRecorder &inStream) const { inStream.Write(mFire); }
-void DestructibleTest::RestoreInputState(StateRecorder &inStream)    { inStream.Read(mFire); }
+void DestructibleTest::SaveInputState(StateRecorder &inStream) const { inStream.Write(mFire); inStream.Write(mDestroyBases); }
+void DestructibleTest::RestoreInputState(StateRecorder &inStream)    { inStream.Read(mFire); inStream.Read(mDestroyBases); }
 
 // ---------------------------------------------------------------------------
 // FireProjectile
@@ -969,6 +983,28 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		mFire = false;
 	}
 
+	// ---- Stress test: destroy every building's base segments at once ----
+	// Fractures the dynamic segments that sit on the static stubs (the dynamic endpoint of every
+	// stub→segment frame joint). Merely severing the base joints isn't enough — the structure
+	// would just rest on its stubs via collision and stay balanced; removing the base segments
+	// leaves nothing under each building so the whole city collapses in one event.
+	if (mDestroyBases)
+	{
+		mDestroyBases = false;
+		UnorderedSet<BodyID> baseBodies;
+		for (Ref<SixDOFConstraint> &cr : mFrameConstraints)
+		{
+			SixDOFConstraint *c = cr.GetPtr();
+			bool s1 = c->GetBody1()->GetMotionType() == EMotionType::Static;
+			bool s2 = c->GetBody2()->GetMotionType() == EMotionType::Static;
+			if (s1 != s2)
+				baseBodies.insert((s1 ? c->GetBody2() : c->GetBody1())->GetID());
+		}
+		for (BodyID id : baseBodies)
+			if (mFractureData.find(id) != mFractureData.end())
+				SpawnFracture(id); // removes the body + its constraints, spawns debris
+	}
+
 	// ---- Expire projectiles (lifetime OR on-impact removal) ----
 	{
 		std::lock_guard<std::mutex> lock(mDamageMutex);
@@ -1213,46 +1249,98 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 				candidates.push_back(cr.GetPtr());
 		}
 
+		// Pre-create the yield-time entries (serial) so the parallel detect phase only WRITES
+		// existing map elements — concurrent operator[] insertion would race / rehash the map.
 		for (SixDOFConstraint *c : candidates)
+			mJointYieldTime.try_emplace(c, 0.0f);
+
+		const float dt = inParams.mDeltaTime;
+
+		// Per-joint read/compute: pure reads of body state + a write to this joint's own yield
+		// timer, appending any joint that should break to outBreaks. No shared mutation, so this
+		// is safe to run concurrently across disjoint candidate ranges.
+		auto detectRange = [&](int inBegin, int inEnd, Array<SixDOFConstraint *> &outBreaks)
+		{
+			for (int i = inBegin; i < inEnd; ++i)
+			{
+				SixDOFConstraint *c = candidates[i];
+				Body *b1 = c->GetBody1(), *b2 = c->GetBody2();
+				if (!b1->IsActive() && !b2->IsActive()) continue;
+
+				// Skip joints where neither side is grounded — they are in freefall together.
+				if (deformGrounded.find(b1->GetID()) == deformGrounded.end() &&
+				    deformGrounded.find(b2->GetID()) == deformGrounded.end()) continue;
+
+				auto restIt = mConstraintRestRot.find(c);
+				if (restIt == mConstraintRestRot.end()) continue;
+
+				Quat  currentRel = b1->GetRotation().Conjugated() * b2->GetRotation();
+				Quat  delta      = restIt->second.Conjugated() * currentRel;
+				float bendAngle  = 2.0f * acosf(JPH::Clamp(abs(delta.GetW()), 0.0f, 1.0f));
+
+				// Sustained-yield accumulator: a joint bent past the elastic limit is plastically
+				// yielding.  Accumulate time while yielding, decay quickly while elastic.
+				float &yieldTime = mJointYieldTime.find(c)->second; // entry pre-created above
+				if (bendAngle > sFrameYieldAngle)
+					yieldTime += dt;
+				else
+					yieldTime = JPH::max(0.0f, yieldTime - 2.0f * dt);
+
+				// Break on a large sustained bend (position-based) or sustained yielding. We do NOT
+				// break on instantaneous angular velocity: when a sleeping building is hit, its stiff
+				// motors re-engage and produce a one-frame velocity burst across every joint, which a
+				// velocity test would misread as failure and pancake the whole structure. Both checks
+				// here are immune to that transient (position doesn't jump on wake; yield needs time).
+				bool angleBreak = bendAngle > sFrameBendThreshold;
+				bool yieldBreak = yieldTime > sFrameYieldTimeLimit;
+				if (angleBreak || yieldBreak)
+					outBreaks.push_back(c);
+			}
+		};
+
+		// Collect joints to break. PrePhysicsUpdate runs before PhysicsSystem::Update, so the job
+		// system's worker threads are idle here — for a large damaged region (e.g. a big tower
+		// collapsing) we fan the read/compute phase out across them. The apply phase below stays
+		// serial because UntrackConstraint mutates shared structures.
+		Array<SixDOFConstraint *> toBreak;
+		const int N = (int)candidates.size();
+		static constexpr int cParallelThreshold = 512;
+		if (mJobSystem != nullptr && N >= cParallelThreshold)
+		{
+			int numJobs = JPH::min(mJobSystem->GetMaxConcurrency(), (N + 255) / 256);
+			Array<Array<SixDOFConstraint *>> perJob;
+			perJob.resize(numJobs);
+
+			JobSystem::Barrier *barrier = mJobSystem->CreateBarrier();
+			for (int k = 0; k < numJobs; ++k)
+			{
+				int lo = N * k / numJobs;
+				int hi = N * (k + 1) / numJobs;
+				JobHandle h = mJobSystem->CreateJob("DestructDeform", Color::sGrey,
+					[&detectRange, &perJob, k, lo, hi]() { detectRange(lo, hi, perJob[k]); });
+				barrier->AddJob(h);
+			}
+			mJobSystem->WaitForJobs(barrier);
+			mJobSystem->DestroyBarrier(barrier);
+
+			for (Array<SixDOFConstraint *> &pj : perJob)
+				for (SixDOFConstraint *c : pj)
+					toBreak.push_back(c);
+		}
+		else
+		{
+			detectRange(0, N, toBreak);
+		}
+
+		// Apply (serial): break each detected joint. Re-fetch the index each time because
+		// UntrackConstraint's swap-and-pop shifts indices as we go.
+		for (SixDOFConstraint *c : toBreak)
 		{
 			auto idxIt = mFrameIdx.find(c);
-			if (idxIt == mFrameIdx.end()) continue; // already broken earlier this frame
-
-			Body *b1 = c->GetBody1(), *b2 = c->GetBody2();
-			if (!b1->IsActive() && !b2->IsActive()) continue;
-
-			// Skip joints where neither side is grounded — they are in freefall together.
-			if (deformGrounded.find(b1->GetID()) == deformGrounded.end() &&
-			    deformGrounded.find(b2->GetID()) == deformGrounded.end()) continue;
-
-			auto restIt = mConstraintRestRot.find(c);
-			if (restIt == mConstraintRestRot.end()) continue;
-
-			Quat  currentRel = b1->GetRotation().Conjugated() * b2->GetRotation();
-			Quat  delta      = restIt->second.Conjugated() * currentRel;
-			float bendAngle  = 2.0f * acosf(JPH::Clamp(abs(delta.GetW()), 0.0f, 1.0f));
-			float swayRate   = (b2->GetAngularVelocity() - b1->GetAngularVelocity()).Length();
-
-			// Sustained-yield accumulator: a joint bent past the elastic limit is plastically
-			// yielding.  Accumulate time while yielding, decay quickly while elastic.  This
-			// fractures overloaded cantilevers that settle into a stable bent equilibrium below
-			// the hard angle threshold (e.g. a corner that lost its columns but is still held by
-			// beams + floor slab on the remaining sides).
-			float &yieldTime = mJointYieldTime[c];
-			if (bendAngle > sFrameYieldAngle)
-				yieldTime += inParams.mDeltaTime;
-			else
-				yieldTime = JPH::max(0.0f, yieldTime - 2.0f * inParams.mDeltaTime);
-
-			bool angleBreak = bendAngle > sFrameBendThreshold;
-			bool swayBreak  = swayRate > sFrameSwayBreakRate && bendAngle > 0.05f;
-			bool yieldBreak = yieldTime > sFrameYieldTimeLimit;
-			if (angleBreak || swayBreak || yieldBreak)
-			{
-				mBodyInterface->ActivateBody(b1->GetID());
-				mBodyInterface->ActivateBody(b2->GetID());
-				UntrackConstraint(true, idxIt->second);
-			}
+			if (idxIt == mFrameIdx.end()) continue; // already removed
+			mBodyInterface->ActivateBody(c->GetBody1()->GetID());
+			mBodyInterface->ActivateBody(c->GetBody2()->GetID());
+			UntrackConstraint(true, idxIt->second);
 		}
 	}
 
@@ -1332,6 +1420,7 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 				g.SetGroupID(newGid);
 				lock.GetBody().SetCollisionGroup(g);
 			}
+			mRegroupedBodies.insert(id); // regroup each body once; ungrounding never reverses
 		};
 
 		// Only bodies of damaged buildings can be ungrounded, so seed the search from those rather
@@ -1359,6 +1448,7 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 		{
 			if (binl.GetMotionType(seed) != EMotionType::Dynamic) continue;
 			if (grounded.find(seed) != grounded.end()) continue;
+			if (mRegroupedBodies.find(seed) != mRegroupedBodies.end()) continue; // already regrouped
 			if (visited.find(seed) != visited.end()) continue;
 
 			uint32 newGid = mNextBuildingGroupID++;
@@ -1378,7 +1468,8 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 						SixDOFConstraint *c = mFrameConstraints[ci];
 						BodyID o = (c->GetBody1()->GetID() == cur) ? c->GetBody2()->GetID() : c->GetBody1()->GetID();
 						if (binl.GetMotionType(o) == EMotionType::Dynamic
-							&& grounded.find(o) == grounded.end() && visited.insert(o).second)
+							&& grounded.find(o) == grounded.end()
+							&& mRegroupedBodies.find(o) == mRegroupedBodies.end() && visited.insert(o).second)
 							q.push_back(o);
 					}
 
@@ -1389,7 +1480,8 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 						FixedConstraint *pc = cref.GetPtr();
 						BodyID o = (pc->GetBody1()->GetID() == cur) ? pc->GetBody2()->GetID() : pc->GetBody1()->GetID();
 						if (binl.GetMotionType(o) == EMotionType::Dynamic
-							&& grounded.find(o) == grounded.end() && !panelGrounded(o) && visited.insert(o).second)
+							&& grounded.find(o) == grounded.end() && !panelGrounded(o)
+							&& mRegroupedBodies.find(o) == mRegroupedBodies.end() && visited.insert(o).second)
 							q.push_back(o);
 					}
 			}
@@ -1461,12 +1553,16 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 
 String DestructibleTest::GetStatusString() const
 {
-	char buf[128];
+	char buf[256];
 	snprintf(buf, sizeof(buf),
-		"Panels: %d / %d  |  Frame: %d / %d  |  Update: %.1f us",
+		"Panels: %d / %d  |  Frame: %d / %d  |  Update: %.1f us\n"
+		"Active bodies: %d  |  Shards: %d  |  Chunks: %d  |  Total bodies: %d",
 		(int)mPanelConstraints.size(), mInitialPanelCount,
 		(int)mFrameConstraints.size(),  mInitialFrameCount,
-		mLastBreakCheckUs);
+		mLastBreakCheckUs,
+		(int)mPhysicsSystem->GetNumActiveBodies(EBodyType::RigidBody),
+		(int)mShardBodies.size(), (int)mFractureData.size(),
+		(int)mPhysicsSystem->GetNumBodies());
 	return buf;
 }
 
@@ -1492,9 +1588,6 @@ void DestructibleTest::CreateSettingsMenu(DebugUI *inUI, UIElement *inSubMenu)
 
 	inUI->CreateSlider(inSubMenu, "Frame Spring Stiffness (N\xc2\xb7m/rad)", sFrameSpringStiffness, 50000.0f, 3000000.0f, 50000.0f,
 		[](float inValue) { sFrameSpringStiffness = inValue; });
-
-	inUI->CreateSlider(inSubMenu, "Sway Break Rate (rad/s)", sFrameSwayBreakRate, 0.1f, 5.0f, 0.1f,
-		[](float inValue) { sFrameSwayBreakRate = inValue; });
 
 	inUI->CreateSlider(inSubMenu, "Yield Angle (rad)", sFrameYieldAngle, 0.01f, 0.20f, 0.01f,
 		[](float inValue) { sFrameYieldAngle = inValue; });

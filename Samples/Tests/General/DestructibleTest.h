@@ -31,7 +31,8 @@ public:
 	{
 		return "A city block with a main demo wall, houses, and multi-story apartment buildings. "
 			   "Panels break from low-energy impacts; frame elements require much more. "
-			   "Press Enter to fire projectiles. Space to drag bodies. "
+			   "Press Enter to fire projectiles. Space to drag bodies. Press K to destroy every "
+			   "building's foundation at once (stress test). "
 			   "Lower Frame Break Force to collapse whole structures.";
 	}
 
@@ -140,6 +141,11 @@ private:
 	UnorderedMap<SixDOFConstraint *, uint32>			mFrameConstraintBuilding;	// frame joint → its stable building id
 	UnorderedSet<uint32>								mDamagedBuildings;			// buildings that have lost ≥1 joint
 
+	// Bodies the unground pass has already given a fresh collision group. Ungrounding is monotonic
+	// (a freed body never re-grounds), so each body is regrouped exactly once — without this the
+	// pass would re-write the collision group of every ungrounded body every frame.
+	UnorderedSet<BodyID>								mRegroupedBodies;
+
 	// Frame-graph snapshot (adjacency + ground-reachable set) persisted ACROSS frames and rebuilt
 	// only when the frame-constraint count changes (i.e. only on frames where a joint broke). The
 	// graph is otherwise static, so on the common "leaning under load" frame this is reused for
@@ -171,6 +177,8 @@ private:
 
 	bool					mFire = false;
 	bool					mWasFire = false;
+	bool					mDestroyBases = false;	// stress test: sever every building's foundation joints at once
+	bool					mWasDestroyBases = false;
 
 	static float			sPanelBreakForce;
 	static float			sFloorBreakForce;
@@ -180,7 +188,6 @@ private:
 	static float			sFrameBendThreshold;    // max deformation angle (rad) before a frame constraint breaks
 	static float			sFrameSpringStiffness;  // N·m/rad — rotational stiffness of frame joints
 	static float			sFrameSpringDamping;    // N·m·s/rad — rotational damping of frame joints
-	static float			sFrameSwayBreakRate;    // rad/s — relative angular velocity at which a joint snaps
 	static float			sFrameYieldAngle;       // rad — bend angle above which a joint is plastically yielding
 	static float			sFrameYieldTimeLimit;   // s — sustained yield duration before the joint fractures
 	static float			sStructuralMassCap;     // kg — effective-mass ceiling for non-projectile impact damage (damage = relV * min(m_reduced, cap))
