@@ -1035,14 +1035,19 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			}
 		}
 
-		// Structural/panel bodies — only freed sections (which exist only after a frame joint
-		// breaks) can sink through the floor; an attached chunk is held above ground. So skip the
-		// whole-scene position scan entirely until there is damage.
+		// Structural/panel bodies — only a body that is actively falling can drop through the floor;
+		// a chunk at rest is held above ground. So check only the active bodies (proportional to the
+		// collapsing region) rather than scanning every chunk in the scene.
 		Array<BodyID> sunken;
 		if (anyDamage)
-			for (auto &kv : mFractureData)
-				if ((float)binl.GetCenterOfMassPosition(kv.first).GetY() < cFallThreshold)
-					sunken.push_back(kv.first);
+		{
+			BodyIDVector activeIds;
+			mPhysicsSystem->GetActiveBodies(EBodyType::RigidBody, activeIds);
+			for (BodyID id : activeIds)
+				if (mFractureData.find(id) != mFractureData.end()
+					&& (float)binl.GetCenterOfMassPosition(id).GetY() < cFallThreshold)
+					sunken.push_back(id);
+		}
 
 		for (BodyID id : sunken)
 		{
@@ -1329,11 +1334,29 @@ void DestructibleTest::PrePhysicsUpdate(const PreUpdateParams &inParams)
 			}
 		};
 
+		// Only bodies of damaged buildings can be ungrounded, so seed the search from those rather
+		// than scanning every frame body in the scene. (The flood-fill below still walks the full
+		// ungrounded component via uadj.)
+		Array<BodyID> seeds;
+		{
+			UnorderedSet<BodyID> seedSet;
+			for (uint32 gid : mDamagedBuildings)
+			{
+				auto bit = mBuildingFrameConstraints.find(gid);
+				if (bit == mBuildingFrameConstraints.end()) continue;
+				for (Ref<SixDOFConstraint> &cr : bit->second)
+				{
+					BodyID a = cr->GetBody1()->GetID(), b = cr->GetBody2()->GetID();
+					if (seedSet.insert(a).second) seeds.push_back(a);
+					if (seedSet.insert(b).second) seeds.push_back(b);
+				}
+			}
+		}
+
 		// Flood each ungrounded component (through frame + panel links) with one fresh GroupID.
 		UnorderedSet<BodyID> visited;
-		for (auto &kv : uadj)
+		for (BodyID seed : seeds)
 		{
-			BodyID seed = kv.first;
 			if (binl.GetMotionType(seed) != EMotionType::Dynamic) continue;
 			if (grounded.find(seed) != grounded.end()) continue;
 			if (visited.find(seed) != visited.end()) continue;
