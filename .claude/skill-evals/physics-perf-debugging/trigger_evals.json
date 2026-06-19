@@ -1,0 +1,22 @@
+[
+  {"query": "my jolt build hitches badly the moment a building starts collapsing in the destruction demo — like a 7ms spike for a few frames then it's fine. where's that coming from?", "should_trigger": true},
+  {"query": "ragdolls in our game randomly twitch and then launch across the level, especially when several are piled on each other. can't figure out why", "should_trigger": true},
+  {"query": "the cloth sim runs fine with one character but tanks the framerate once there's a crowd, profiler says most of it is in the solver. how do i bring it down", "should_trigger": true},
+  {"query": "vehicle feels wrong in our physx game — the truck flips on a tiny bump it should just roll over", "should_trigger": true},
+  {"query": "every time i spawn a big pile of debris the whole sim starts jittering and the boxes never settle", "should_trigger": true},
+  {"query": "box2d: when i stack ~50 crates the bottom ones sink into each other and the whole stack vibrates, how do i debug this", "should_trigger": true},
+  {"query": "our bullet physics scene starts spitting NaNs after a couple minutes in big fights and bodies vanish", "should_trigger": true},
+  {"query": "frame time spikes to 12ms whenever i blow the wall apart but it's basically free when nothing moves — want to kill the spikes", "should_trigger": true},
+  {"query": "why does my soft body blow up when i grab a vertex and yank it fast", "should_trigger": true},
+  {"query": "the constraint solver is eating ~80% of the physics frame when the bridge collapses, how do i reduce that without it falling apart", "should_trigger": true},
+  {"query": "add a hinge constraint between the door and its frame in my jolt scene", "should_trigger": false},
+  {"query": "my react dashboard re-renders way too much and the UI feels janky, help me profile and fix it", "should_trigger": false},
+  {"query": "the shadows flicker and my GPU frame time is too high, the renderer is the bottleneck", "should_trigger": false},
+  {"query": "write a unit test for my AABB-vs-ray intersection function", "should_trigger": false},
+  {"query": "how do i enable double precision in jolt for a large open world?", "should_trigger": false},
+  {"query": "my enemy pathfinding makes them take weird zigzag routes around obstacles, the A* looks wrong", "should_trigger": false},
+  {"query": "port this Box2D platformer tutorial from C++ to Rust for me", "should_trigger": false},
+  {"query": "players see each other teleporting around in multiplayer, i think the lobby is dropping sync packets", "should_trigger": false},
+  {"query": "what's a sensible mass and friction value for the debris chunks in my destruction setup?", "should_trigger": false},
+  {"query": "set up continuous collision detection for fast projectiles in my engine", "should_trigger": false}
+]

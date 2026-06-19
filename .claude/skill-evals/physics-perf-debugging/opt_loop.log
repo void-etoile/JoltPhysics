@@ -1,0 +1,56 @@
+Split: 12 train, 8 test (holdout=0.4)
+
+============================================================
+Iteration 1/5
+Description: Profile-driven workflow for debugging high-performance real-time physics and simulation code (game physics engines, rigid-body/constraint solvers, cloth, particles, destruction, large agent sims — e.g. Jolt, PhysX, Box2D, Bullet, or bespoke solvers). Use this whenever the task is a per-frame spike or frame-time regression, a solver blow-up (bodies flying / jitter / NaNs / "can't settle"), or simulation behaviour that "looks wrong" (collapses, ragdolls, vehicles, fluids behaving unrealistically) and you need to find the cause and fix it without destabilising the sim. Trigger it even when the user just says "this is slow", "it spikes", "it explodes", "it looks wrong", or "why is it doing that" in a physics/simulation context, before reaching for a code change.
+============================================================
+Train: 18/36 correct, precision=100% recall=0% accuracy=50% (8.1s)
+  [FAIL] rate=0/3 expected=True: box2d: when i stack ~50 crates the bottom ones sink into eac
+  [FAIL] rate=0/3 expected=True: every time i spawn a big pile of debris the whole sim starts
+  [FAIL] rate=0/3 expected=True: our bullet physics scene starts spitting NaNs after a couple
+  [FAIL] rate=0/3 expected=True: the constraint solver is eating ~80% of the physics frame wh
+  [FAIL] rate=0/3 expected=True: ragdolls in our game randomly twitch and then launch across 
+  [FAIL] rate=0/3 expected=True: my jolt build hitches badly the moment a building starts col
+  [PASS] rate=0/3 expected=False: my react dashboard re-renders way too much and the UI feels 
+  [PASS] rate=0/3 expected=False: what's a sensible mass and friction value for the debris chu
+  [PASS] rate=0/3 expected=False: players see each other teleporting around in multiplayer, i 
+  [PASS] rate=0/3 expected=False: add a hinge constraint between the door and its frame in my 
+  [PASS] rate=0/3 expected=False: port this Box2D platformer tutorial from C++ to Rust for me
+  [PASS] rate=0/3 expected=False: set up continuous collision detection for fast projectiles i
+Test : 12/24 correct, precision=100% recall=0% accuracy=50% (0.0s)
+  [FAIL] rate=0/3 expected=True: frame time spikes to 12ms whenever i blow the wall apart but
+  [FAIL] rate=0/3 expected=True: vehicle feels wrong in our physx game — the truck flips on a
+  [FAIL] rate=0/3 expected=True: the cloth sim runs fine with one character but tanks the fra
+  [FAIL] rate=0/3 expected=True: why does my soft body blow up when i grab a vertex and yank 
+  [PASS] rate=0/3 expected=False: write a unit test for my AABB-vs-ray intersection function
+  [PASS] rate=0/3 expected=False: my enemy pathfinding makes them take weird zigzag routes aro
+  [PASS] rate=0/3 expected=False: the shadows flicker and my GPU frame time is too high, the r
+  [PASS] rate=0/3 expected=False: how do i enable double precision in jolt for a large open wo
+
+Improving description...
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/jamespa/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/3833f0c9-90a7-479c-babf-d5342c04be10/5b8c80bb-3fce-4cbc-a573-9d171371ee2d/skills/skill-creator/scripts/run_loop.py", line 328, in <module>
+    main()
+    ~~~~^^
+  File "/Users/jamespa/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/3833f0c9-90a7-479c-babf-d5342c04be10/5b8c80bb-3fce-4cbc-a573-9d171371ee2d/skills/skill-creator/scripts/run_loop.py", line 293, in main
+    output = run_loop(
+        eval_set=eval_set,
+    ...<11 lines>...
+        log_dir=log_dir,
+    )
+  File "/Users/jamespa/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/3833f0c9-90a7-479c-babf-d5342c04be10/5b8c80bb-3fce-4cbc-a573-9d171371ee2d/skills/skill-creator/scripts/run_loop.py", line 199, in run_loop
+    new_description = improve_description(
+        skill_name=name,
+    ...<6 lines>...
+        iteration=iteration,
+    )
+  File "/Users/jamespa/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/3833f0c9-90a7-479c-babf-d5342c04be10/5b8c80bb-3fce-4cbc-a573-9d171371ee2d/skills/skill-creator/scripts/improve_description.py", line 144, in improve_description
+    text = _call_claude(prompt, model)
+  File "/Users/jamespa/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/3833f0c9-90a7-479c-babf-d5342c04be10/5b8c80bb-3fce-4cbc-a573-9d171371ee2d/skills/skill-creator/scripts/improve_description.py", line 44, in _call_claude
+    raise RuntimeError(
+        f"claude -p exited {result.returncode}\nstderr: {result.stderr}"
+    )
+RuntimeError: claude -p exited 1
+stderr: 
