@@ -660,12 +660,16 @@ void DestructibleTest::BuildApartment(RVec3Arg inCenter, int inNumFloors, float 
 		panelC(cFL, pl); panelC(cBL, pl);
 		panelC(cFR, pr); panelC(cBR, pr);
 
-		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 200.0f);
-		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
-		mFractureData[flr->GetID()].mIsFloor = true;
-		panelC(bf, flr); panelC(bb, flr);
-		panelC(bl, flr); panelC(br, flr);
-
+		// Skip the top storey's ceiling slab — the roof (added after the loop) caps it; otherwise the
+		// slab and roof are co-located (beam_y == roof_y) and overlap as a duplicated roof.
+		if (f + 1 < inNumFloors)
+		{
+			Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 200.0f);
+			regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
+			mFractureData[flr->GetID()].mIsFloor = true;
+			panelC(bf, flr); panelC(bb, flr);
+			panelC(bl, flr); panelC(br, flr);
+		}
 	}
 
 	float roof_y = aStubH + inNumFloors * aFloorH;
@@ -763,6 +767,8 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 				frameC(cols[xi][zi][s], cols[xi][zi][s + 1]);
 		}
 
+	const float roof_y = hStubH + float(numSegs) * segH; // roof cap height (may sit above the top floor when floors don't divide evenly into segments)
+
 	for (int f = 0; f < inNumFloors; ++f)
 	{
 		int   s       = f / inFloorsPerSeg;
@@ -802,14 +808,18 @@ void DestructibleTest::BuildHighrise(RVec3Arg inCenter, int inNumFloors, int inF
 		panelC(cFL, pl); panelC(cBL, pl);
 		panelC(cFR, pr); panelC(cBR, pr);
 
-		Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 300.0f);
-		regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
-		mFractureData[flr->GetID()].mIsFloor = true;
-		panelC(bf, flr); panelC(bb, flr);
-		panelC(bl, flr); panelC(br, flr);
+		// Skip a ceiling slab that would coincide with the roof cap (overlapping duplicate). When the
+		// roof sits above the top floor (floors don't divide evenly into segments) the slab is kept.
+		if (beam_y < roof_y - 0.05f)
+		{
+			Body *flr = addBody(RVec3(0, beam_y, 0), s_flr, EMotionType::Dynamic, Layers::MOVING, 300.0f);
+			regElem(flr, RVec3(0, beam_y, 0), Vec3(inHalfW - 0.1f, 0.08f, inHalfD - 0.1f), cFracturePieces, false);
+			mFractureData[flr->GetID()].mIsFloor = true;
+			panelC(bf, flr); panelC(bb, flr);
+			panelC(bl, flr); panelC(br, flr);
+		}
 	}
 
-	float  roof_y = hStubH + float(numSegs) * segH;
 	Body  *roof   = addBody(RVec3(0, roof_y, 0), s_roof, EMotionType::Dynamic, Layers::MOVING, 400.0f);
 	regElem(roof, RVec3(0, roof_y, 0), Vec3(inHalfW - 0.1f, 0.1f, inHalfD - 0.1f), cFracturePieces, true);
 	for (int xi = 0; xi < 2; ++xi)
@@ -975,22 +985,26 @@ void DestructibleTest::BuildTower(RVec3Arg inCenter, int inNumFloors, float inRa
 			panelC(cols[kn][f], panel);
 		}
 
-		// Octagonal floor slab spanning the interior at beam level
-		Body *flr = addBody(RVec3(0, beam_y, 0), Quat::sIdentity(), s_floor,
-			EMotionType::Dynamic, Layers::MOVING, 300.0f);
+		// Octagonal floor slab spanning the interior at beam level. Skip the top storey's slab — the
+		// roof (added after the loop) is at the same height and would overlap it as a duplicate.
+		if (f + 1 < inNumFloors)
 		{
-			RVec3 wp = inCenter + RVec3(0, beam_y, 0);
-			uint32 fseed = uint32(int(float(wp.GetX()) * 100.0f) * 73856093u
-				^ int(float(wp.GetY()) * 100.0f) * 19349663u
-				^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
-			FractureInfo finfo;
-			finfo.mIsFrame = false;
-			finfo.mIsFloor = true;
-			sGenerateFractureShapesPoly(floorPoly, 0.08f, fseed, cFracturePieces, finfo.mShapes, finfo.mLocalCenters);
-			mFractureData[flr->GetID()] = finfo;
+			Body *flr = addBody(RVec3(0, beam_y, 0), Quat::sIdentity(), s_floor,
+				EMotionType::Dynamic, Layers::MOVING, 300.0f);
+			{
+				RVec3 wp = inCenter + RVec3(0, beam_y, 0);
+				uint32 fseed = uint32(int(float(wp.GetX()) * 100.0f) * 73856093u
+					^ int(float(wp.GetY()) * 100.0f) * 19349663u
+					^ int(float(wp.GetZ()) * 100.0f) * 83492791u);
+				FractureInfo finfo;
+				finfo.mIsFrame = false;
+				finfo.mIsFloor = true;
+				sGenerateFractureShapesPoly(floorPoly, 0.08f, fseed, cFracturePieces, finfo.mShapes, finfo.mLocalCenters);
+				mFractureData[flr->GetID()] = finfo;
+			}
+			for (Body *b : ringBeams)
+				panelC(b, flr);
 		}
-		for (Body *b : ringBeams)
-			panelC(b, flr);
 	}
 
 	float  roof_y = tStubH + inNumFloors * tFloorH;
